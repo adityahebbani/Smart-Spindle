@@ -57,9 +57,35 @@ int main(void) {
     SystemInit();
     internal_clock();
 
-    // TODO: Initialize peripherals and port your application logic here
+    // Initialize GPIOA for LED (PA5)
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    GPIOA->MODER &= ~(0x3 << (5 * 2)); // Clear mode bits for PA5
+    GPIOA->MODER |= (0x1 << (5 * 2));  // Set PA5 to output
+
+    // Simple LED blink and serial print test
+    // Initialize USART2 for serial (PA2: TX, PA3: RX)
+    // Enable clocks
+    RCC->APB1ENR |= RCC_APB1ENR_USART2EN;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    // Set PA2 and PA3 to alternate function
+    GPIOA->MODER &= ~((0x3 << (2 * 2)) | (0x3 << (3 * 2)));
+    GPIOA->MODER |= (0x2 << (2 * 2)) | (0x2 << (3 * 2));
+    GPIOA->AFR[0] |= (0x7 << (2 * 4)) | (0x7 << (3 * 4)); // AF7 for USART2
+    // Configure USART2: 9600 baud, 8N1
+    USART2->BRR = (uint16_t)(42000000 / 9600); // APB1 at 42MHz
+    USART2->CR1 = USART_CR1_TE | USART_CR1_UE; // Enable TX, USART
+
+    // Print hello message
+    const char *msg = "Hello from STM32F401RE!\r\n";
+    for (const char *p = msg; *p; ++p) {
+        while (!(USART2->SR & USART_SR_TXE));
+        USART2->DR = *p;
+    }
 
     while (1) {
-        // Main loop
+        // Toggle LED
+        GPIOA->ODR ^= (1 << 5);
+        // Delay
+        for (volatile int i = 0; i < 800000; ++i);
     }
 }
