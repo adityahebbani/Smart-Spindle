@@ -126,10 +126,11 @@ void i2c1_init(void) {
     GPIOB->AFR[1] &= ~((0xF << ((8-8) * 4)) | (0xF << ((9-8) * 4)));
     GPIOB->AFR[1] |= (0x4 << ((8-8) * 4)) | (0x4 << ((9-8) * 4));
     // Open-drain, pull-up
-    GPIOB->ODR |= (1 << 8) | (1 << 9);
     GPIOB->OTYPER |= (1 << 8) | (1 << 9);
     GPIOB->PUPDR &= ~((0x3 << (8 * 2)) | (0x3 << (9 * 2)));
     GPIOB->PUPDR |= (0x1 << (8 * 2)) | (0x1 << (9 * 2));
+    // Add: Set ODR high to release the I2C lines (critical)
+    GPIOB->ODR |= (1 << 8) | (1 << 9);
     // Configure I2C1: 100kHz standard mode (assuming 16MHz PCLK1)
     I2C1->CR2 = 16; // 16 MHz
     I2C1->CCR = 80; // 100kHz
