@@ -271,14 +271,20 @@ int main(void) {
     // APB1 is 16 MHz by default
     USART2->BRR = (uint16_t)(16000000 / 9600);
     USART2->CR1 = USART_CR1_TE | USART_CR1_UE;
-    // Blink LED and print message
+
+    // --- I2C1/ADXL345 minimal test ---
+    i2c1_init();
+    for (volatile int i = 0; i < 1600000; ++i); // ~100ms delay
+    uint8_t devid = adxl345_read_devid();
+    char msg[32];
+    snprintf(msg, sizeof(msg), "ADXL345 DEVID: 0x%02X\r\n", devid);
+    for (const char *p = msg; *p; ++p) {
+        while (!(USART2->SR & USART_SR_TXE));
+        USART2->DR = *p;
+    }
+    // Blink LED to show code is running
     while (1) {
-        GPIOA->ODR ^= (1 << 5); // Toggle LED
-        const char *msg = "Serial test\r\n";
-        for (const char *p = msg; *p; ++p) {
-            while (!(USART2->SR & USART_SR_TXE));
-            USART2->DR = *p;
-        }
-        for (volatile int i = 0; i < 800000; ++i); // Delay
+        GPIOA->ODR ^= (1 << 5);
+        for (volatile int i = 0; i < 800000; ++i);
     }
 }
