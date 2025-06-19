@@ -259,7 +259,9 @@ int main(void) {
     // 4. Initialize accelerometer interrupt
     accel_int_init();
 
-    // Test: Read and print ADXL345 DEVID register
+    // In main(), after initializing I2C and before reading DEVID:
+    // Add a delay (~100ms) to allow ADXL345 to power up
+    for (volatile int i = 0; i < 16000000; ++i); // ~100ms at 16MHz
     uint8_t devid = adxl345_read_devid();
     char msg[32];
     snprintf(msg, sizeof(msg), "ADXL345 DEVID: 0x%02X", devid);
