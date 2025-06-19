@@ -272,6 +272,11 @@ int main(void) {
     USART2->BRR = (uint16_t)(16000000 / 9600);
     USART2->CR1 = USART_CR1_TE | USART_CR1_UE;
 
+    for (int i = 0; i < 5; ++i) {
+        GPIOA->ODR ^= (1 << 5);
+        for (volatile int j = 0; j < 800000; ++j);
+    }
+
     // --- I2C1/ADXL345 minimal test ---
     i2c1_init();
     for (volatile int i = 0; i < 1600000; ++i); // ~100ms delay
