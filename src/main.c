@@ -240,6 +240,14 @@ void EXTI0_IRQHandler(void) {
     }
 }
 
+// --- Test: Read and print ADXL345 DEVID register ---
+uint8_t adxl345_read_devid(void) {
+    uint8_t devid = 0;
+    // Read DEVID register (0x00)
+    i2c1_read_bytes(ADXL345_ADDR, 0x00, &devid, 1);
+    return devid;
+}
+
 /* Main */
 int main(void) {
     // 1. Set up internal clock
@@ -250,6 +258,12 @@ int main(void) {
     adxl345_init();
     // 4. Initialize accelerometer interrupt
     accel_int_init();
+
+    // Test: Read and print ADXL345 DEVID register
+    uint8_t devid = adxl345_read_devid();
+    char msg[32];
+    snprintf(msg, sizeof(msg), "ADXL345 DEVID: 0x%02X", devid);
+    log(LOG_INFO, msg);
 
     while (1) {
         // Main loop
