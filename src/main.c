@@ -1,6 +1,6 @@
-// #include "stm32f4xx.h"
-// #include <stdio.h>
-// #include <string.h>
+#include "stm32f4xx.h"
+#include <stdio.h>
+#include <string.h>
 
 // /* Internal clock set to 84 MHz */
 // void internal_clock(void)
@@ -54,8 +54,8 @@
 // /* Main */
 // int main(void) {
 //     // System Initialization
-//     SystemInit();
-//     internal_clock();
+//     // SystemInit();
+//     // internal_clock();
 
 //     // Initialize GPIOA for LED (PA5)
 //     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
@@ -91,7 +91,21 @@
 // }
 
 
-#include "stm32f4xx.h"
+// #include "stm32f4xx.h"
+
+// int main(void) {
+//     // Enable GPIOA clock
+//     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+//     // Set PA5 as output
+//     GPIOA->MODER &= ~(0x3 << (5 * 2));
+//     GPIOA->MODER |= (0x1 << (5 * 2));
+
+//     while (1) {
+//         GPIOA->ODR ^= (1 << 5); // Toggle LED
+//         for (volatile int i = 0; i < 800000; ++i); // Delay
+//     }
+// }
+
 
 int main(void) {
     // Enable GPIOA clock
@@ -99,6 +113,23 @@ int main(void) {
     // Set PA5 as output
     GPIOA->MODER &= ~(0x3 << (5 * 2));
     GPIOA->MODER |= (0x1 << (5 * 2));
+
+    // Enable USART2 clock
+    RCC->APB1ENR |= RCC_APB1ENR_USART2EN;
+    // Set PA2 to alternate function (AF7)
+    GPIOA->MODER &= ~(0x3 << (2 * 2));
+    GPIOA->MODER |= (0x2 << (2 * 2));
+    GPIOA->AFR[0] |= (0x7 << (2 * 4));
+    // Configure USART2: 9600 baud, 8N1 (assuming APB1 at 16 MHz)
+    USART2->BRR = (uint16_t)(16000000 / 9600);
+    USART2->CR1 = USART_CR1_TE | USART_CR1_UE;
+
+    // Print hello message
+    const char *msg = "Hello from STM32F401RE!\r\n";
+    for (const char *p = msg; *p; ++p) {
+        while (!(USART2->SR & USART_SR_TXE));
+        USART2->DR = *p;
+    }
 
     while (1) {
         GPIOA->ODR ^= (1 << 5); // Toggle LED
