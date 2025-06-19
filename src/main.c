@@ -120,15 +120,15 @@ void i2c1_init(void) {
     // Enable GPIOB and I2C1 clocks
     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
     RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
-    // Set PB6, PB7 to alternate function (AF4)
-    GPIOB->MODER &= ~((0x3 << (6 * 2)) | (0x3 << (7 * 2)));
-    GPIOB->MODER |= (0x2 << (6 * 2)) | (0x2 << (7 * 2));
-    GPIOB->AFR[0] &= ~((0xF << (6 * 4)) | (0xF << (7 * 4)));
-    GPIOB->AFR[0] |= (0x4 << (6 * 4)) | (0x4 << (7 * 4));
+    // Set PB8, PB9 to alternate function (AF4)
+    GPIOB->MODER &= ~((0x3 << (8 * 2)) | (0x3 << (9 * 2)));
+    GPIOB->MODER |= (0x2 << (8 * 2)) | (0x2 << (9 * 2));
+    GPIOB->AFR[1] &= ~((0xF << ((8-8) * 4)) | (0xF << ((9-8) * 4)));
+    GPIOB->AFR[1] |= (0x4 << ((8-8) * 4)) | (0x4 << ((9-8) * 4));
     // Open-drain, pull-up
-    GPIOB->OTYPER |= (1 << 6) | (1 << 7);
-    GPIOB->PUPDR &= ~((0x3 << (6 * 2)) | (0x3 << (7 * 2)));
-    GPIOB->PUPDR |= (0x1 << (6 * 2)) | (0x1 << (7 * 2));
+    GPIOB->OTYPER |= (1 << 8) | (1 << 9);
+    GPIOB->PUPDR &= ~((0x3 << (8 * 2)) | (0x3 << (9 * 2)));
+    GPIOB->PUPDR |= (0x1 << (8 * 2)) | (0x1 << (9 * 2));
     // Configure I2C1: 100kHz standard mode (assuming 16MHz PCLK1)
     I2C1->CR2 = 16; // 16 MHz
     I2C1->CCR = 80; // 100kHz
