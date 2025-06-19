@@ -139,27 +139,6 @@ void i2c1_init(void) {
 // --- ADXL345 I2C address (SDO=GND) ---
 #define ADXL345_ADDR 0x53
 
-// --- I2C1 (PB8=SCL, PB9=SDA) setup for ADXL345 ---
-void i2c1_init(void) {
-    // Enable GPIOB and I2C1 clocks
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
-    RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
-    // Set PB8, PB9 to alternate function (AF4)
-    GPIOB->MODER &= ~((0x3 << (8 * 2)) | (0x3 << (9 * 2)));
-    GPIOB->MODER |= (0x2 << (8 * 2)) | (0x2 << (9 * 2));
-    GPIOB->AFR[1] &= ~((0xF << ((8-8) * 4)) | (0xF << ((9-8) * 4)));
-    GPIOB->AFR[1] |= (0x4 << ((8-8) * 4)) | (0x4 << ((9-8) * 4));
-    // Open-drain, pull-up
-    GPIOB->OTYPER |= (1 << 8) | (1 << 9);
-    GPIOB->PUPDR &= ~((0x3 << (8 * 2)) | (0x3 << (9 * 2)));
-    GPIOB->PUPDR |= (0x1 << (8 * 2)) | (0x1 << (9 * 2));
-    // Configure I2C1: 100kHz standard mode (assuming 16MHz PCLK1)
-    I2C1->CR2 = 16; // 16 MHz
-    I2C1->CCR = 80; // 100kHz
-    I2C1->TRISE = 17; // 1000ns / (1/16MHz) + 1
-    I2C1->CR1 |= I2C_CR1_PE;
-}
-
 // --- I2C1 Write/Read helpers ---
 void i2c1_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data) {
     I2C1->CR1 |= I2C_CR1_START;
@@ -211,6 +190,9 @@ void adxl345_init(void) {
     i2c1_write_reg(ADXL345_ADDR, 0x2C, 0x0A);
     // Enable measurement (POWER_CTL = 0x2D, value = 0x08)
     i2c1_write_reg(ADXL345_ADDR, 0x2D, 0x08);
+    // Enable DATA_READY interrupt on INT1
+    i2c1_write_reg(ADXL345_ADDR, 0x2E, 0x80); // INT_ENABLE: DATA_READY
+    i2c1_write_reg(ADXL345_ADDR, 0x2F, 0x80); // INT_MAP: DATA_READY to INT1 (default)
 }
 
 // --- Read acceleration data (X, Y, Z) ---
