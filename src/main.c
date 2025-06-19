@@ -55,6 +55,10 @@ int main(void) {
     USART2->BRR = (uint16_t)(16000000 / 9600);
 #endif
     USART2->CR1 = USART_CR1_TE | USART_CR1_UE;
+
+    // Delay to allow USART to stabilize
+    for (volatile int i = 0; i < 8000000; ++i);
+
     // Toggle LED before serial print
     GPIOA->ODR ^= (1 << 5);
     // Print hello message
@@ -66,6 +70,11 @@ int main(void) {
     // Toggle LED after serial print
     GPIOA->ODR ^= (1 << 5);
     while (1) {
+        const char *msg = "Hello from STM32F401RE!\r\n";
+        for (const char *p = msg; *p; ++p) {
+            while (!(USART2->SR & USART_SR_TXE));
+            USART2->DR = *p;
+        }
         // Blink LED
         GPIOA->ODR ^= (1 << 5);
         for (volatile int i = 0; i < 800000; ++i);
