@@ -249,25 +249,36 @@ uint8_t adxl345_read_devid(void) {
 }
 
 /* Main */
+// Minimal test: Blink LED and print to serial to verify board and serial setup
 int main(void) {
-    // 1. Set up internal clock
-    internal_clock();
-    // 2. Initialize I2C1 for ADXL345
-    i2c1_init();
-    // 3. Initialize ADXL345
-    adxl345_init();
-    // 4. Initialize accelerometer interrupt
-    accel_int_init();
-
-    // In main(), after initializing I2C and before reading DEVID:
-    // Add a delay (~100ms) to allow ADXL345 to power up
-    for (volatile int i = 0; i < 16000000; ++i); // ~100ms at 16MHz
-    uint8_t devid = adxl345_read_devid();
-    char msg[32];
-    snprintf(msg, sizeof(msg), "ADXL345 DEVID: 0x%02X", devid);
-    log(LOG_INFO, msg);
-
+    // Enable GPIOA clock
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    // Set PA5 as output (LED)
+    GPIOA->MODER &= ~(0x3 << (5 * 2));
+    GPIOA->MODER |= (0x1 << (5 * 2));
+    // Enable USART2 clock
+    RCC->APB1ENR |= RCC_APB1ENR_USART2EN;
+    // Set PA2 to alternate function (AF7)
+    GPIOA->MODER &= ~(0x3 << (2 * 2));
+    GPIOA->MODER |= (0x2 << (2 * 2));
+    GPIOA->AFR[0] &= ~(0xF << (2 * 4));
+    GPIOA->AFR[0] |= (0x7 << (2 * 4));
+    // Set PA3 to alternate function (AF7)
+    GPIOA->MODER &= ~(0x3 << (3 * 2));
+    GPIOA->MODER |= (0x2 << (3 * 2));
+    GPIOA->AFR[0] &= ~(0xF << (3 * 4));
+    GPIOA->AFR[0] |= (0x7 << (3 * 4));
+    // APB1 is 16 MHz by default
+    USART2->BRR = (uint16_t)(16000000 / 9600);
+    USART2->CR1 = USART_CR1_TE | USART_CR1_UE;
+    // Blink LED and print message
     while (1) {
-        // Main loop
+        GPIOA->ODR ^= (1 << 5); // Toggle LED
+        const char *msg = "Serial test\r\n";
+        for (const char *p = msg; *p; ++p) {
+            while (!(USART2->SR & USART_SR_TXE));
+            USART2->DR = *p;
+        }
+        for (volatile int i = 0; i < 800000; ++i); // Delay
     }
 }
