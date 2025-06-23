@@ -299,7 +299,14 @@ typedef struct { int16_t x, y, z; } adxl345_axes_t;
 
 void adxl345_read_axes(adxl345_axes_t *axes) {
     uint8_t buf[6];
-    i2c1_read_bytes(ADXL345_ADDR, 0x32, buf, 6);
+    int result = i2c1_read_bytes(ADXL345_ADDR, 0x32, buf, 6);
+    if (result != 0) {
+        // On error, set values to a recognizable pattern
+        axes->x = -9999;
+        axes->y = -9999;
+        axes->z = -9999;
+        return;
+    }
     axes->x = (int16_t)(buf[1] << 8 | buf[0]);
     axes->y = (int16_t)(buf[3] << 8 | buf[2]);
     axes->z = (int16_t)(buf[5] << 8 | buf[4]);
@@ -342,8 +349,12 @@ void EXTI0_IRQHandler(void) {
 // --- Test: Read and print ADXL345 DEVID register ---
 uint8_t adxl345_read_devid(void) {
     uint8_t devid = 0;
-    // Read DEVID register (0x00)
-    i2c1_read_bytes(ADXL345_ADDR, 0x00, &devid, 1);
+    if (i2c1_read_bytes(ADXL345_ADDR, 0x00, &devid, 1) != 0) {
+        // Communication error - try recovery
+        i2c_bus_recovery();
+        i2c1_init();
+        i2c1_read_bytes(ADXL345_ADDR, 0x00, &devid, 1);
+    }
     return devid;
 }
 
@@ -379,30 +390,46 @@ int main(void) {
     // --- I2C1/ADXL345 minimal test ---
     i2c_bus_recovery();
     i2c1_init();
+
+    // Add delay
+    for (volatile int i = 0; i < 1600000; ++i);
+
+    adxl345_init();
     for (volatile int i = 0; i < 1600000; ++i); // ~100ms delay
 
-    // Print DEVID repeatedly to verify I2C communication
-    while (1) {
-        uint8_t devid = adxl345_read_devid();
-        char msg[32];
-        snprintf(msg, sizeof(msg), "ADXL345 DEVID: 0x%02X\r\n", devid);
-        for (const char *p = msg; *p; ++p) {
-            while (!(USART2->SR & USART_SR_TXE));
-            USART2->DR = *p;
-        }
+    // Check device ID - should be 0xE5 for ADXL345
+    uint8_t devid = adxl345_read_devid();
+    char init_msg[40];
+    snprintf(init_msg, sizeof(init_msg), "ADXL345 ID: 0x%02X (expect 0xE5)\r\n", devid);
+    for (const char *p = init_msg; *p; ++p) {
+        while (!(USART2->SR & USART_SR_TXE));
+        USART2->DR = *p;
+    }
 
+    // Main data reading loop
+    while (1) {
         // Read and print accelerometer axes
         adxl345_axes_t axes;
         adxl345_read_axes(&axes);
+        
+        // Check if axes are valid (not our error code)
+        if (axes.x == -9999) {
+            // Try recovery
+            i2c_bus_recovery();
+            i2c1_init();
+            adxl345_init();
+            continue;
+        }
+        
         char axes_msg[64];
-        snprintf(axes_msg, sizeof(axes_msg), "X=%d Y=%d Z=%d\r\n", axes.x, axes.y, axes.z);
+        snprintf(axes_msg, sizeof(axes_msg), "X=%5d Y=%5d Z=%5d\r\n", axes.x, axes.y, axes.z);
         for (const char *p = axes_msg; *p; ++p) {
             while (!(USART2->SR & USART_SR_TXE));
             USART2->DR = *p;
         }
 
-        // Blink LED to show code is running
+        // Shorter delay for more responsive readings
         GPIOA->ODR ^= (1 << 5);
-        for (volatile int i = 0; i < 800000; ++i);
+        for (volatile int i = 0; i < 200000; ++i); // 1/4 of your original delay for more frequent updates
     }
 }
