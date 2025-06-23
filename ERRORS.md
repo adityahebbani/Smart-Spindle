@@ -65,3 +65,9 @@ shutdown command invoked
 --- More details at https://bit.ly/pio-monitor-filters
 --- Quit: Ctrl+C | Menu: Ctrl+T | Help: Ctrl+T followed by Ctrl+H
 
+
+Program
+ received signal SIGINT, Interrupt.
+0x08000370 in i2c1_read_bytes (dev_addr=dev_addr@entry=83 'S', reg=reg@entry=0 '\000', buf=buf@entry=0x20017f6f "", len=len@entry=1 '\001') at src\main.c:162
+162	    while (!(I2C1->SR1 & I2C_SR1_SB));
+When running the debugger, the program seems to hang on this line in i2c1_read_bytes function. Can you explain what is going on here? 
