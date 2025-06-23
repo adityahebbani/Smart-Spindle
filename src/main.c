@@ -250,8 +250,7 @@ uint8_t adxl345_read_devid(void) {
     return devid;
 }
 
-/* Main */
-// Minimal test: Blink LED and print to serial to verify board and serial setup
+// --- Main function ---
 int main(void) {
     // Enable GPIOA clock
     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
@@ -274,6 +273,7 @@ int main(void) {
     USART2->BRR = (uint16_t)(16000000 / 9600);
     USART2->CR1 = USART_CR1_TE | USART_CR1_UE;
 
+    // Blink LED a few times to show startup
     for (int i = 0; i < 5; ++i) {
         GPIOA->ODR ^= (1 << 5);
         for (volatile int j = 0; j < 800000; ++j);
@@ -282,15 +282,28 @@ int main(void) {
     // --- I2C1/ADXL345 minimal test ---
     i2c1_init();
     for (volatile int i = 0; i < 1600000; ++i); // ~100ms delay
-    uint8_t devid = adxl345_read_devid();
-    char msg[32];
-    snprintf(msg, sizeof(msg), "ADXL345 DEVID: 0x%02X\r\n", devid);
-    for (const char *p = msg; *p; ++p) {
-        while (!(USART2->SR & USART_SR_TXE));
-        USART2->DR = *p;
-    }
-    // Blink LED to show code is running
+
+    // Print DEVID repeatedly to verify I2C communication
     while (1) {
+        uint8_t devid = adxl345_read_devid();
+        char msg[32];
+        snprintf(msg, sizeof(msg), "ADXL345 DEVID: 0x%02X\r\n", devid);
+        for (const char *p = msg; *p; ++p) {
+            while (!(USART2->SR & USART_SR_TXE));
+            USART2->DR = *p;
+        }
+
+        // Read and print accelerometer axes
+        adxl345_axes_t axes;
+        adxl345_read_axes(&axes);
+        char axes_msg[64];
+        snprintf(axes_msg, sizeof(axes_msg), "X=%d Y=%d Z=%d\r\n", axes.x, axes.y, axes.z);
+        for (const char *p = axes_msg; *p; ++p) {
+            while (!(USART2->SR & USART_SR_TXE));
+            USART2->DR = *p;
+        }
+
+        // Blink LED to show code is running
         GPIOA->ODR ^= (1 << 5);
         for (volatile int i = 0; i < 800000; ++i);
     }
