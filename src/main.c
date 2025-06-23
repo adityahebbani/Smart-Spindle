@@ -115,8 +115,11 @@ void log_session_event(EventType type, const char *date, float revs) {
     flash_log_append(&ev);
 }
 
-// --- I2C1 (PB6=SCL, PB7=SDA) setup for accelerometer ---
+// --- I2C1 (PB8=SCL, PB9=SDA) setup for accelerometer ---
 void i2c1_init(void) {
+    // Reset I2C1 peripheral
+    RCC->APB1RSTR |= RCC_APB1RSTR_I2C1RST;
+    RCC->APB1RSTR &= ~RCC_APB1RSTR_I2C1RST;
     // Enable GPIOB and I2C1 clocks
     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
     RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
@@ -156,30 +159,124 @@ void i2c1_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data) {
     I2C1->CR1 |= I2C_CR1_STOP;
 }
 
-void i2c1_read_bytes(uint8_t dev_addr, uint8_t reg, uint8_t *buf, uint8_t len) {
+int i2c1_read_bytes(uint8_t dev_addr, uint8_t reg, uint8_t *buf, uint8_t len) {
+    const uint32_t MAX_TIMEOUT = 50000; // Adjust based on your system speed
+    uint32_t timeout;
+    
     // Write register address
     I2C1->CR1 |= I2C_CR1_START;
-    while (!(I2C1->SR1 & I2C_SR1_SB));
+    
+    // Wait for start condition with timeout
+    timeout = MAX_TIMEOUT;
+    while (!(I2C1->SR1 & I2C_SR1_SB) && timeout) timeout--;
+    if (!timeout) {
+        I2C1->CR1 |= I2C_CR1_STOP; // Send stop to release the bus
+        return -1;  // Timeout error
+    }
+    
     (void)I2C1->SR1;
     I2C1->DR = (dev_addr << 1);
-    while (!(I2C1->SR1 & I2C_SR1_ADDR));
+    
+    // Wait for address sent with timeout
+    timeout = MAX_TIMEOUT;
+    while (!(I2C1->SR1 & I2C_SR1_ADDR) && timeout) timeout--;
+    if (!timeout) {
+        I2C1->CR1 |= I2C_CR1_STOP;
+        return -2;  // Address error
+    }
+    
     (void)I2C1->SR2;
     I2C1->DR = reg;
-    while (!(I2C1->SR1 & I2C_SR1_TXE));
+    
+    // Wait for register address sent with timeout
+    timeout = MAX_TIMEOUT;
+    while (!(I2C1->SR1 & I2C_SR1_TXE) && timeout) timeout--;
+    if (!timeout) {
+        I2C1->CR1 |= I2C_CR1_STOP;
+        return -3;  // Register address error
+    }
+    
     // Restart for read
     I2C1->CR1 |= I2C_CR1_START;
-    while (!(I2C1->SR1 & I2C_SR1_SB));
+    
+    // Wait for restart with timeout
+    timeout = MAX_TIMEOUT;
+    while (!(I2C1->SR1 & I2C_SR1_SB) && timeout) timeout--;
+    if (!timeout) {
+        I2C1->CR1 |= I2C_CR1_STOP;
+        return -4;  // Restart error
+    }
+    
     (void)I2C1->SR1;
-    I2C1->DR = (dev_addr << 1) | 1;
-    while (!(I2C1->SR1 & I2C_SR1_ADDR));
+    I2C1->DR = (dev_addr << 1) | 1;  // Read mode
+    
+    // Wait for address in read mode with timeout
+    timeout = MAX_TIMEOUT;
+    while (!(I2C1->SR1 & I2C_SR1_ADDR) && timeout) timeout--;
+    if (!timeout) {
+        I2C1->CR1 |= I2C_CR1_STOP;
+        return -5;  // Read address error
+    }
+    
     (void)I2C1->SR2;
+    
+    // For single byte read, disable ACK before clearing ADDR
+    if (len == 1) {
+        I2C1->CR1 &= ~I2C_CR1_ACK;
+    } else {
+        I2C1->CR1 |= I2C_CR1_ACK;
+    }
+    
+    // Read data bytes
     for (uint8_t i = 0; i < len; ++i) {
-        if (i == len - 1) I2C1->CR1 &= ~I2C_CR1_ACK;
-        while (!(I2C1->SR1 & I2C_SR1_RXNE));
+        // For last byte, we need to send NACK
+        if (i == len - 1 && len > 1) {
+            I2C1->CR1 &= ~I2C_CR1_ACK;
+        }
+        
+        // Wait for data with timeout
+        timeout = MAX_TIMEOUT;
+        while (!(I2C1->SR1 & I2C_SR1_RXNE) && timeout) timeout--;
+        if (!timeout) {
+            I2C1->CR1 |= I2C_CR1_STOP;
+            return -6;  // Data receive error
+        }
+        
         buf[i] = I2C1->DR;
     }
+    
+    // Generate stop condition
     I2C1->CR1 |= I2C_CR1_STOP;
+    
+    // Re-enable ACK for future transfers
     I2C1->CR1 |= I2C_CR1_ACK;
+    
+    return 0;  // Success
+}
+
+void i2c_bus_recovery(void) {
+    // Temporarily configure pins as GPIO
+    GPIOB->MODER &= ~((0x3 << (8 * 2)) | (0x3 << (9 * 2)));
+    GPIOB->MODER |= (0x1 << (8 * 2)) | (0x1 << (9 * 2));
+    
+    // Toggle SCL to free any stuck devices
+    for (int i = 0; i < 9; i++) {
+        GPIOB->ODR |= (1 << 8);   // SCL high
+        for (volatile int j = 0; j < 1000; j++);
+        GPIOB->ODR &= ~(1 << 8);  // SCL low
+        for (volatile int j = 0; j < 1000; j++);
+    }
+    
+    // Generate STOP condition
+    GPIOB->ODR &= ~(1 << 9);  // SDA low
+    for (volatile int j = 0; j < 1000; j++);
+    GPIOB->ODR |= (1 << 8);   // SCL high
+    for (volatile int j = 0; j < 1000; j++);
+    GPIOB->ODR |= (1 << 9);   // SDA high
+    
+    // Reconfigure for I2C
+    GPIOB->MODER &= ~((0x3 << (8 * 2)) | (0x3 << (9 * 2)));
+    GPIOB->MODER |= (0x2 << (8 * 2)) | (0x2 << (9 * 2));
 }
 
 // --- ADXL345 Initialization ---
@@ -280,6 +377,7 @@ int main(void) {
     }
 
     // --- I2C1/ADXL345 minimal test ---
+    i2c_bus_recovery();
     i2c1_init();
     for (volatile int i = 0; i < 1600000; ++i); // ~100ms delay
 
