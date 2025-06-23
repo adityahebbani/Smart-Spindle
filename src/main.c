@@ -145,18 +145,60 @@ void i2c1_init(void) {
 #define ADXL345_ADDR 0x53
 
 // --- I2C1 Write/Read helpers ---
-void i2c1_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data) {
+int i2c1_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data) {
+    const uint32_t MAX_TIMEOUT = 50000; // Same timeout as in read function
+    uint32_t timeout;
+    
+    // Generate start condition
     I2C1->CR1 |= I2C_CR1_START;
-    while (!(I2C1->SR1 & I2C_SR1_SB));
-    (void)I2C1->SR1;
-    I2C1->DR = (dev_addr << 1);
-    while (!(I2C1->SR1 & I2C_SR1_ADDR));
-    (void)I2C1->SR2;
+    
+    // Wait for start condition with timeout
+    timeout = MAX_TIMEOUT;
+    while (!(I2C1->SR1 & I2C_SR1_SB) && timeout) timeout--;
+    if (!timeout) {
+        I2C1->CR1 |= I2C_CR1_STOP; // Send stop to release the bus
+        return -1;  // Timeout error
+    }
+    
+    (void)I2C1->SR1; // Clear SB flag
+    I2C1->DR = (dev_addr << 1); // Send device address (write mode)
+    
+    // Wait for address sent with timeout
+    timeout = MAX_TIMEOUT;
+    while (!(I2C1->SR1 & I2C_SR1_ADDR) && timeout) timeout--;
+    if (!timeout) {
+        I2C1->CR1 |= I2C_CR1_STOP;
+        return -2;  // Address error
+    }
+    
+    (void)I2C1->SR2; // Clear ADDR flag
+    
+    // Send register address
     I2C1->DR = reg;
-    while (!(I2C1->SR1 & I2C_SR1_TXE));
+    
+    // Wait for TXE with timeout
+    timeout = MAX_TIMEOUT;
+    while (!(I2C1->SR1 & I2C_SR1_TXE) && timeout) timeout--;
+    if (!timeout) {
+        I2C1->CR1 |= I2C_CR1_STOP;
+        return -3;  // Register address error
+    }
+    
+    // Send data
     I2C1->DR = data;
-    while (!(I2C1->SR1 & I2C_SR1_TXE));
+    
+    // Wait for TXE with timeout
+    timeout = MAX_TIMEOUT;
+    while (!(I2C1->SR1 & I2C_SR1_TXE) && timeout) timeout--;
+    if (!timeout) {
+        I2C1->CR1 |= I2C_CR1_STOP;
+        return -4;  // Data write error
+    }
+    
+    // Generate stop condition
     I2C1->CR1 |= I2C_CR1_STOP;
+    
+    return 0;  // Success
 }
 
 int i2c1_read_bytes(uint8_t dev_addr, uint8_t reg, uint8_t *buf, uint8_t len) {
@@ -281,17 +323,30 @@ void i2c_bus_recovery(void) {
 
 // --- ADXL345 Initialization ---
 void adxl345_init(void) {
-    // Wake up (POWER_CTL = 0x2D, value = 0x08)
-    i2c1_write_reg(ADXL345_ADDR, 0x2D, 0x08);
-    // Set data format: full resolution, +/- 2g (DATA_FORMAT = 0x31, value = 0x08)
-    i2c1_write_reg(ADXL345_ADDR, 0x31, 0x08);
+    // Reset the device
+    i2c1_write_reg(ADXL345_ADDR, 0x2D, 0x00); // Reset POWER_CTL
+    
+    // Verify device ID (should be 0xE5)
+    uint8_t devid = 0;
+    if (i2c1_read_bytes(ADXL345_ADDR, 0x00, &devid, 1) == 0) {
+        if (devid != 0xE5) {
+            // Device ID is wrong - try bus recovery
+            i2c_bus_recovery();
+            i2c1_init();
+        }
+    }
+    
+    // Configure data format: full resolution, +/- 8g (DATA_FORMAT = 0x31, value = 0x0B)
+    i2c1_write_reg(ADXL345_ADDR, 0x31, 0x0B);
+    
     // Set BW_RATE to 100 Hz (0x0A)
     i2c1_write_reg(ADXL345_ADDR, 0x2C, 0x0A);
-    // Enable measurement (POWER_CTL = 0x2D, value = 0x08)
+    
+    // Enable measurement mode (POWER_CTL = 0x2D, value = 0x08)
     i2c1_write_reg(ADXL345_ADDR, 0x2D, 0x08);
-    // Enable DATA_READY interrupt on INT1
-    i2c1_write_reg(ADXL345_ADDR, 0x2E, 0x80); // INT_ENABLE: DATA_READY
-    i2c1_write_reg(ADXL345_ADDR, 0x2F, 0x80); // INT_MAP: DATA_READY to INT1 (default)
+    
+    // Optionally enable FIFO in stream mode for better reading stability
+    i2c1_write_reg(ADXL345_ADDR, 0x38, 0x80); // FIFO_CTL: Stream mode
 }
 
 // --- Read acceleration data (X, Y, Z) ---
