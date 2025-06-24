@@ -1,6 +1,8 @@
 #include "stm32f4xx.h"
 
 #define ADXL345_ADDR 0x53
+#define DS3231_ADDR  0x68
+#define TSL2591_ADDR 0x29
 
 void delay(volatile uint32_t d) { while (d--) __NOP(); }
 
@@ -85,24 +87,40 @@ int main(void) {
     i2c1_init();
     delay(1600000);
 
-    usart2_print("ADXL345 Minimal Test\r\n");
-
+    // usart2_print("ADXL345 Minimal Test\r\n");
     uint8_t devid = 0;
     int result = i2c1_read_reg(ADXL345_ADDR, 0x00, &devid);
-
     char msg[64];
     if (result == 0 && devid == 0xE5) {
         usart2_print("ADXL345 detected! DEVID=0xE5\r\n");
-        while (1) {
-            led_toggle();
-            delay(800000);
-        }
     } else {
         snprintf(msg, sizeof(msg), "ERROR: result=%d, DEVID=0x%02X\r\n", result, devid);
         usart2_print(msg);
-        while (1) {
-            delay(400000);
-            led_toggle();
-        }
+    }
+
+    // DS3231 check (read seconds register, should be valid BCD)
+    uint8_t seconds = 0;
+    result = i2c1_read_reg(DS3231_ADDR, 0x00, &seconds);
+    if (result == 0) {
+        snprintf(msg, sizeof(msg), "DS3231 detected! Seconds=0x%02X\r\n", seconds);
+        usart2_print(msg);
+    } else {
+        snprintf(msg, sizeof(msg), "DS3231 ERROR: result=%d\r\n", result);
+        usart2_print(msg);
+    }
+
+    // TSL2591 check (read ID register, should be 0x50 per datasheet)
+    uint8_t tsl_id = 0;
+    result = i2c1_read_reg(TSL2591_ADDR, 0x12, &tsl_id);
+    if (result == 0 && tsl_id == 0x50) {
+        usart2_print("TSL2591 detected! ID=0x50\r\n");
+    } else {
+        snprintf(msg, sizeof(msg), "TSL2591 ERROR: result=%d, ID=0x%02X\r\n", result, tsl_id);
+        usart2_print(msg);
+    }
+
+    while (1) {
+        led_toggle();
+        delay(800000);
     }
 }
