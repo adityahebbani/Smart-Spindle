@@ -12,7 +12,7 @@
 typedef enum { LOG_OFF, LOG_ERROR, LOG_INFO, LOG_DEBUG, LOG_SILLY } LogLevel;
 LogLevel log_level = LOG_INFO;
 
-void log(LogLevel level, const char* msg) {
+void logger(LogLevel level, const char* msg) {
     if (level <= log_level) {
         printf("%s\n", msg);
     }
@@ -397,13 +397,13 @@ void EXTI0_IRQHandler(void) {
     if (EXTI->PR & EXTI_PR_PR0) {
         EXTI->PR = EXTI_PR_PR0; // Clear pending bit
         // TODO: Handle accelerometer event (read data, log, etc.)
-        log(LOG_INFO, "Accelerometer interrupt!");
+        logger(LOG_INFO, "Accelerometer interrupt!");
         // Read and print axes
         adxl345_axes_t axes;
         adxl345_read_axes(&axes);
         char msg[64];
         snprintf(msg, sizeof(msg), "ADXL345: X=%d Y=%d Z=%d", axes.x, axes.y, axes.z);
-        log(LOG_INFO, msg);
+        logger(LOG_INFO, msg);
     }
 }
 
@@ -427,6 +427,11 @@ uint32_t getTimeMs(void) { return msTicks; }
 // Helper: Convert BCD to binary
 static uint8_t bcd2bin(uint8_t val) {
     return (val >> 4) * 10 + (val & 0x0F);
+}
+
+// Helper: Convert binary to BCD
+static uint8_t bin2bcd(uint8_t val) {
+    return ((val / 10) << 4) | (val % 10);
 }
 
 int set_ds3231_time(uint16_t year, uint8_t month, uint8_t day, uint8_t weekday,
