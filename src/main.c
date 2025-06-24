@@ -1,6 +1,12 @@
 #include "stm32f4xx.h"
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
+#include <stdint.h>
+
+#define DS3231_ADDR 0x68
+#define ROTATION_THRESHOLD  1000    // Adjust this threshold for your application
+#define SESSION_TIMEOUT_MS  10000   // 10 seconds
 
 /* Logger */
 typedef enum { LOG_OFF, LOG_ERROR, LOG_INFO, LOG_DEBUG, LOG_SILLY } LogLevel;
@@ -50,7 +56,7 @@ void internal_clock(void)
     while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_PLL);
 }
 
-// Flash log configuration
+/* Flash memory handling */
 #define FLASH_LOG_SECTOR   7  // Use sector 7 (last 128KB of 512KB flash)
 #define FLASH_LOG_ADDRESS  0x08060000  // Start of sector 7
 #define FLASH_LOG_SIZE     (128 * 1024) // 128KB
@@ -413,6 +419,51 @@ uint8_t adxl345_read_devid(void) {
     return devid;
 }
 
+/* RTC Logic */
+volatile uint32_t msTicks = 0;
+void SysTick_Handler(void) { msTicks++; }
+uint32_t getTimeMs(void) { return msTicks; }
+
+// Helper: Convert BCD to binary
+static uint8_t bcd2bin(uint8_t val) {
+    return (val >> 4) * 10 + (val & 0x0F);
+}
+
+int set_ds3231_time(uint16_t year, uint8_t month, uint8_t day, uint8_t weekday,
+                    uint8_t hour, uint8_t min, uint8_t sec) {
+    uint8_t data[7];
+    data[0] = bin2bcd(sec);
+    data[1] = bin2bcd(min);
+    data[2] = bin2bcd(hour);      // 24h mode
+    data[3] = bin2bcd(weekday);   // 1=Sunday, 7=Saturday
+    data[4] = bin2bcd(day);
+    data[5] = bin2bcd(month);
+    data[6] = bin2bcd(year % 100);
+
+    // Write all 7 bytes starting at register 0x00
+    for (int i = 0; i < 7; ++i) {
+        if (i2c1_write_reg(DS3231_ADDR, 0x00 + i, data[i]) != 0)
+            return -1; // Error
+    }
+    return 0; // Success
+}
+
+// Dummy RTC function (replace with your actual RTC read)
+void rtc_get_datetime(char *buf, size_t len) {
+    uint8_t data[7] = {0};
+    if (i2c1_read_bytes(DS3231_ADDR, 0x00, data, 7) == 0) {
+        uint8_t sec  = bcd2bin(data[0]);
+        uint8_t min  = bcd2bin(data[1]);
+        uint8_t hour = bcd2bin(data[2] & 0x3F); // 24h mode
+        uint8_t day  = bcd2bin(data[4]);
+        uint8_t mon  = bcd2bin(data[5] & 0x1F);
+        uint16_t year = 2000 + bcd2bin(data[6]);
+        snprintf(buf, len, "%04u-%02u-%02u %02u:%02u:%02u", year, mon, day, hour, min, sec);
+    } else {
+        snprintf(buf, len, "RTC ERROR");
+    }
+}
+
 // --- Main function ---
 int main(void) {
     // Enable GPIOA clock
@@ -443,7 +494,7 @@ int main(void) {
     }
 
     // --- I2C1/ADXL345 minimal test ---
-    i2c_bus_recovery();
+    // i2c_bus_recovery();
     i2c1_init();
 
     // Add delay
@@ -451,6 +502,8 @@ int main(void) {
 
     adxl345_init();
     for (volatile int i = 0; i < 1600000; ++i); // ~100ms delay
+
+    set_ds3231_time(2025, 6, 24, 2, 14, 30, 0);
 
     // Check device ID - should be 0xE5 for ADXL345
     uint8_t devid = adxl345_read_devid();
@@ -461,31 +514,79 @@ int main(void) {
         USART2->DR = *p;
     }
 
+    // Systick timer for millisecond timing
+    SysTick_Config(SystemCoreClock / 1000); // 1 ms tick
+    int session_active = 0;
+    float session_rotations = 0.0f;
+    float prev_z = 0.0f;
+    uint32_t last_motion_time = 0;
+
     // Main data reading loop
     while (1) {
         // Read and print accelerometer axes
         adxl345_axes_t axes;
         adxl345_read_axes(&axes);
         
-        // Check if axes are valid (not our error code)
-        if (axes.x == -9999) {
-            // Try recovery
-            i2c_bus_recovery();
-            i2c1_init();
-            adxl345_init();
-            continue;
-        }
+    //     // Check if axes are valid (not our error code)
+    //     if (axes.x == -9999) {
+    //         // Try recovery
+    //         i2c_bus_recovery();
+    //         i2c1_init();
+    //         adxl345_init();
+    //         continue;
+    //     }
         
-        char axes_msg[64];
-        snprintf(axes_msg, sizeof(axes_msg), "X=%5d Y=%5d Z=%5d\r\n", axes.x, axes.y, axes.z);
-        for (const char *p = axes_msg; *p; ++p) {
-            while (!(USART2->SR & USART_SR_TXE));
-            USART2->DR = *p;
+    //     char axes_msg[64];
+    //     snprintf(axes_msg, sizeof(axes_msg), "X=%5d Y=%5d Z=%5d\r\n", axes.x, axes.y, axes.z);
+    //     for (const char *p = axes_msg; *p; ++p) {
+    //         while (!(USART2->SR & USART_SR_TXE));
+    //         USART2->DR = *p;
+    //     }
+
+    //     // Shorter delay for more responsive readings
+    //     GPIOA->ODR ^= (1 << 5);
+    //     for (volatile int i = 0; i < 200000; ++i); // 1/4 of your original delay for more frequent updates
+    // 
+
+    // Use Z axis for rotation (replace with your actual calculation if needed)
+        float z = (float)axes.z;
+
+        // Calculate delta
+        float dz = fabsf(z - prev_z);
+        prev_z = z;
+
+        // Detect significant motion
+        if (dz > ROTATION_THRESHOLD) {
+            if (!session_active) {
+                session_active = 1;
+                session_rotations = 0.0f;
+                char msg[64];
+                snprintf(msg, sizeof(msg), "Session started\r\n");
+                for (const char *p = msg; *p; ++p) {
+                    while (!(USART2->SR & USART_SR_TXE));
+                    USART2->DR = *p;
+                }
+            }
+            session_rotations += dz; // Or use your own conversion to revolutions
+            last_motion_time = getTimeMs();
         }
 
-        // Shorter delay for more responsive readings
-        GPIOA->ODR ^= (1 << 5);
-        for (volatile int i = 0; i < 200000; ++i); // 1/4 of your original delay for more frequent updates
+        // If session is active, check for timeout
+        if (session_active && (getTimeMs() - last_motion_time > SESSION_TIMEOUT_MS)) {
+            session_active = 0;
+            char datetime[32];
+            rtc_get_datetime(datetime, sizeof(datetime));
+            char msg[128];
+            snprintf(msg, sizeof(msg), "[%s] Session ended. Rotations: %.2f\r\n", datetime, session_rotations / ROTATION_THRESHOLD);
+            for (const char *p = msg; *p; ++p) {
+                while (!(USART2->SR & USART_SR_TXE));
+                USART2->DR = *p;
+            }
+        }
+
+        // Short delay
+        for (volatile int i = 0; i < 20000; ++i);
     }
+
 }
 
