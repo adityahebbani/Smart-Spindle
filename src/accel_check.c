@@ -111,7 +111,7 @@ int main(void) {
 
     // TSL2591 check (read ID register, should be 0x50 per datasheet)
     uint8_t tsl_id = 0;
-    result = i2c1_read_reg(TSL2591_ADDR, 0x12, &tsl_id);
+    result = i2c1_read_reg(TSL2591_ADDR, 0xA0 | 0x12, &tsl_id);
     if (result == 0 && tsl_id == 0x50) {
         usart2_print("TSL2591 detected! ID=0x50\r\n");
     } else {
