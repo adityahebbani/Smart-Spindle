@@ -1,6 +1,7 @@
 #include "stm32f4xx.h"
 #include <stdio.h>
 #include <string.h>
+#define _USE_MATH_DEFINES
 #include <math.h>
 #include <stdint.h>
 
@@ -521,9 +522,10 @@ int main(void) {
 
     // Systick timer for millisecond timing
     SysTick_Config(SystemCoreClock / 1000); // 1 ms tick
+    float prev_angle = 0.0f;
+    float total_angle = 0.0f;
     int session_active = 0;
     float session_rotations = 0.0f;
-    float prev_z = 0.0f;
     uint32_t last_motion_time = 0;
 
     // Main data reading loop
@@ -553,18 +555,21 @@ int main(void) {
     //     for (volatile int i = 0; i < 200000; ++i); // 1/4 of your original delay for more frequent updates
     // 
 
-    // Use Z axis for rotation (replace with your actual calculation if needed)
-        float z = (float)axes.z;
+        // Calculate angle from X and Y
+        float angle = atan2f((float)axes.y, (float)axes.x); // radians
 
-        // Calculate delta
-        float dz = fabsf(z - prev_z);
-        prev_z = z;
+        // Calculate change in angle
+        float delta_angle = angle - prev_angle;
+        // Handle wrap-around
+        if (delta_angle > M_PI) delta_angle -= 2 * M_PI;
+        if (delta_angle < -M_PI) delta_angle += 2 * M_PI;
 
-        // Detect significant motion
-        if (dz > ROTATION_THRESHOLD) {
+        // Only count significant changes (filter noise)
+        if (fabsf(delta_angle) > 0.05f) { // 0.05 rad ~3 deg, adjust as needed
             if (!session_active) {
                 session_active = 1;
                 session_rotations = 0.0f;
+                total_angle = 0.0f;
                 char msg[64];
                 snprintf(msg, sizeof(msg), "Session started\r\n");
                 for (const char *p = msg; *p; ++p) {
@@ -572,17 +577,19 @@ int main(void) {
                     USART2->DR = *p;
                 }
             }
-            session_rotations += dz; // Or use your own conversion to revolutions
+            total_angle += delta_angle;
+            session_rotations = total_angle / (2 * M_PI);
             last_motion_time = getTimeMs();
         }
+        prev_angle = angle;
 
-        // If session is active, check for timeout
+        // Session timeout logic
         if (session_active && (getTimeMs() - last_motion_time > SESSION_TIMEOUT_MS)) {
             session_active = 0;
             char datetime[32];
             rtc_get_datetime(datetime, sizeof(datetime));
             char msg[128];
-            snprintf(msg, sizeof(msg), "[%s] Session ended. Rotations: %.2f\r\n", datetime, session_rotations / ROTATION_THRESHOLD);
+            snprintf(msg, sizeof(msg), "[%s] Session ended. Rotations: %.2f\r\n", datetime, session_rotations);
             for (const char *p = msg; *p; ++p) {
                 while (!(USART2->SR & USART_SR_TXE));
                 USART2->DR = *p;
@@ -592,6 +599,5 @@ int main(void) {
         // Short delay
         for (volatile int i = 0; i < 20000; ++i);
     }
-
 }
 
