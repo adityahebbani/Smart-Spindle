@@ -6,8 +6,8 @@
 #include <stdint.h>
 
 #define DS3231_ADDR 0x68
-#define ROTATION_THRESHOLD  1000    // Adjust this threshold for your application
-#define SESSION_TIMEOUT_MS  10000   // 10 seconds
+#define ROTATION_THRESHOLD  10    // Adjust this threshold for your application
+#define SESSION_TIMEOUT_MS  2000   // 10 seconds
 
 /* Logger */
 typedef enum { LOG_OFF, LOG_ERROR, LOG_INFO, LOG_DEBUG, LOG_SILLY } LogLevel;
@@ -499,15 +499,11 @@ int main(void) {
         for (volatile int j = 0; j < 800000; ++j);
     }
 
-    // --- I2C1/ADXL345 minimal test ---
-    // i2c_bus_recovery();
+    // I2C and ADXL345 init
     i2c1_init();
-
-    // Add delay
     for (volatile int i = 0; i < 1600000; ++i);
-
     adxl345_init();
-    for (volatile int i = 0; i < 1600000; ++i); // ~100ms delay
+    for (volatile int i = 0; i < 1600000; ++i);
 
     set_ds3231_time(2025, 6, 24, 2, 14, 30, 0);
 
@@ -522,38 +518,30 @@ int main(void) {
 
     // Systick timer for millisecond timing
     SysTick_Config(SystemCoreClock / 1000); // 1 ms tick
+
     float prev_angle = 0.0f;
     float total_angle = 0.0f;
     int session_active = 0;
     float session_rotations = 0.0f;
     uint32_t last_motion_time = 0;
 
-    // Main data reading loop
     while (1) {
-        // Read and print accelerometer axes
         adxl345_axes_t axes;
         adxl345_read_axes(&axes);
-        
-    //     // Check if axes are valid (not our error code)
-    //     if (axes.x == -9999) {
-    //         // Try recovery
-    //         i2c_bus_recovery();
-    //         i2c1_init();
-    //         adxl345_init();
-    //         continue;
-    //     }
-        
-    //     char axes_msg[64];
-    //     snprintf(axes_msg, sizeof(axes_msg), "X=%5d Y=%5d Z=%5d\r\n", axes.x, axes.y, axes.z);
-    //     for (const char *p = axes_msg; *p; ++p) {
-    //         while (!(USART2->SR & USART_SR_TXE));
-    //         USART2->DR = *p;
-    //     }
 
-    //     // Shorter delay for more responsive readings
-    //     GPIOA->ODR ^= (1 << 5);
-    //     for (volatile int i = 0; i < 200000; ++i); // 1/4 of your original delay for more frequent updates
-    // 
+        // Check for sensor error
+        if (axes.x == -9999) {
+            char err[] = "ADXL345 read error\r\n";
+            for (const char *p = err; *p; ++p) {
+                while (!(USART2->SR & USART_SR_TXE));
+                USART2->DR = *p;
+            }
+            // Try recovery
+            i2c_bus_recovery();
+            i2c1_init();
+            adxl345_init();
+            continue;
+        }
 
         // Calculate angle from X and Y
         float angle = atan2f((float)axes.y, (float)axes.x); // radians
@@ -563,6 +551,14 @@ int main(void) {
         // Handle wrap-around
         if (delta_angle > M_PI) delta_angle -= 2 * M_PI;
         if (delta_angle < -M_PI) delta_angle += 2 * M_PI;
+
+        // Debug: print angle and delta
+        char dbg[64];
+        snprintf(dbg, sizeof(dbg), "angle=%.2f delta=%.2f\r\n", angle, delta_angle);
+        for (const char *p = dbg; *p; ++p) {
+            while (!(USART2->SR & USART_SR_TXE));
+            USART2->DR = *p;
+        }
 
         // Only count significant changes (filter noise)
         if (fabsf(delta_angle) > 0.05f) { // 0.05 rad ~3 deg, adjust as needed
@@ -600,4 +596,3 @@ int main(void) {
         for (volatile int i = 0; i < 20000; ++i);
     }
 }
-
