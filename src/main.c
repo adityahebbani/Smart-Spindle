@@ -536,27 +536,56 @@ int main(void) {
         continue;
     }
 
+    // Debug print every 50 loops
+    static int print_counter = 0;
+    if (++print_counter >= 50) {
+        char raw[64];
+        snprintf(raw, sizeof(raw), "X=%d Y=%d Z=%d\r\n", axes.x, axes.y, axes.z);
+        for (const char *p = raw; *p; ++p) {
+            while (!(USART2->SR & USART_SR_TXE));
+            USART2->DR = *p;
+        }
+        print_counter = 0;
+    }
+
     // Always use atan2f to measure angle in X/Y plane
     float angle = atan2f((float)axes.y, (float)axes.x);
-
     float delta_angle = angle - prev_angle;
+
     // Handle wrap
     if (delta_angle > M_PI)  delta_angle -= 2.0f * M_PI;
     if (delta_angle < -M_PI) delta_angle += 2.0f * M_PI;
 
-    // Accumulate total angle for session
+    if (fabsf(delta_angle) > 0.05f && print_counter == 0) {
+        char dbg[64];
+        snprintf(dbg, sizeof(dbg), "angle=%.2f delta=%.2f\r\n", angle, delta_angle);
+        for (const char *p = dbg; *p; ++p) {
+            while (!(USART2->SR & USART_SR_TXE));
+            USART2->DR = *p;
+        }
+    }
+
+    // Session and rotation tracking logic
     if (fabsf(delta_angle) > 0.05f) {
         if (!session_active) {
             session_active = 1;
             session_rotations = 0.0f;
             total_angle = 0.0f;
+            
+            char msg[64];
+            snprintf(msg, sizeof(msg), "Session started\r\n");
+            for (const char *p = msg; *p; ++p) {
+                while (!(USART2->SR & USART_SR_TXE));
+                USART2->DR = *p;
+            }
         }
+        
         total_angle += delta_angle;
-        session_rotations = total_angle / (2.0f * M_PI);
+        session_rotations = fabsf(total_angle) / (2.0f * M_PI);  // Take absolute value
         last_motion_time = getTimeMs();
     }
     prev_angle = angle;
-
+    
     // Session timeout
     if (session_active && (getTimeMs() - last_motion_time > SESSION_TIMEOUT_MS)) {
         session_active = 0;
