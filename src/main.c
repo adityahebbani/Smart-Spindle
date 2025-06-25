@@ -524,12 +524,13 @@ int main(void) {
     int session_active = 0;
     float session_rotations = 0.0f;
     uint32_t last_motion_time = 0;
-    static int print_counter = 0;
 
-    // Test print to verify float printing works
-    char test_msg[40];
-    snprintf(test_msg, sizeof(test_msg), "Float test: %f\r\n", 3.14159f);
-    for (const char *p = test_msg; *p; ++p) {
+    // Print startup message
+    char log_msg[64];
+    char datetime[32];
+    rtc_get_datetime(datetime, sizeof(datetime));
+    snprintf(log_msg, sizeof(log_msg), "[%s] System ready\r\n", datetime);
+    for (const char *p = log_msg; *p; ++p) {
         while (!(USART2->SR & USART_SR_TXE));
         USART2->DR = *p;
     }
@@ -539,47 +540,23 @@ int main(void) {
         adxl345_read_axes(&axes);
 
         if (axes.x == -9999) {
-            char err_msg[] = "ADXL345 read error\r\n";
-            for (const char *p = err_msg; *p; ++p) {
-                while (!(USART2->SR & USART_SR_TXE));
-                USART2->DR = *p;
-            }
             i2c_bus_recovery();
             i2c1_init();
             adxl345_init();
             continue;
         }
 
-        // Increment counter for periodic printing
-        if (++print_counter >= 50) {
-            print_counter = 0;
-            
-            // Print raw accelerometer data
-            char raw[64];
-            snprintf(raw, sizeof(raw), "X=%d Y=%d Z=%d\r\n", axes.x, axes.y, axes.z);
-            for (const char *p = raw; *p; ++p) {
-                while (!(USART2->SR & USART_SR_TXE));
-                USART2->DR = *p;
-            }
-            
-            // Always print angle/delta values (regardless of magnitude)
-            float angle = atan2f((float)axes.y, (float)axes.x);
-            float delta_angle = angle - prev_angle;
-            
-            // Handle wrap-around
-            if (delta_angle > M_PI)  delta_angle -= 2.0f * M_PI;
-            if (delta_angle < -M_PI) delta_angle += 2.0f * M_PI;
-            
-            char angle_msg[64];
-            snprintf(angle_msg, sizeof(angle_msg), "angle=%+.4f delta=%+.4f\r\n", 
-                     angle, delta_angle);
-            for (const char *p = angle_msg; *p; ++p) {
-                while (!(USART2->SR & USART_SR_TXE));
-                USART2->DR = *p;
-            }
+        // Comment out accelerometer raw data printing
+        /*
+        char raw[64];
+        snprintf(raw, sizeof(raw), "X=%d Y=%d Z=%d\r\n", axes.x, axes.y, axes.z);
+        for (const char *p = raw; *p; ++p) {
+            while (!(USART2->SR & USART_SR_TXE));
+            USART2->DR = *p;
         }
+        */
         
-        // Always calculate angle for rotation tracking (even when not printing)
+        // Calculate angle for rotation tracking
         float angle = atan2f((float)axes.y, (float)axes.x);
         float delta_angle = angle - prev_angle;
         
@@ -587,42 +564,47 @@ int main(void) {
         if (delta_angle > M_PI)  delta_angle -= 2.0f * M_PI;
         if (delta_angle < -M_PI) delta_angle += 2.0f * M_PI;
 
-        // Session and rotation tracking logic (unchanged)
+        // Session and rotation tracking
         if (fabsf(delta_angle) > 0.05f) {
             if (!session_active) {
                 session_active = 1;
                 session_rotations = 0.0f;
                 total_angle = 0.0f;
                 
-                char msg[64];
-                snprintf(msg, sizeof(msg), "Session started\r\n");
-                for (const char *p = msg; *p; ++p) {
+                // Log session start with timestamp
+                rtc_get_datetime(datetime, sizeof(datetime));
+                snprintf(log_msg, sizeof(log_msg), "[%s] Session started\r\n", datetime);
+                for (const char *p = log_msg; *p; ++p) {
                     while (!(USART2->SR & USART_SR_TXE));
                     USART2->DR = *p;
                 }
             }
             
             total_angle += delta_angle;
-            session_rotations = fabsf(total_angle) / (2.0f * M_PI);  // Take absolute value
+            session_rotations = fabsf(total_angle) / (2.0f * M_PI);
             last_motion_time = getTimeMs();
         }
         prev_angle = angle;
 
-        // Session timeout
+        // Session timeout and logging
         if (session_active && (getTimeMs() - last_motion_time > SESSION_TIMEOUT_MS)) {
             session_active = 0;
-            char datetime[32];
+            
+            // Log session end with timestamp and rotation count
             rtc_get_datetime(datetime, sizeof(datetime));
-            char msg[128];
-            snprintf(msg, sizeof(msg), "[%s] Session ended. Rotations: %.2f\r\n",
-                    datetime, session_rotations);
-            for (const char *p = msg; *p; ++p) {
+            snprintf(log_msg, sizeof(log_msg), 
+                     "[%s] Session ended. Rotations: %.2f\r\n", 
+                     datetime, session_rotations);
+            for (const char *p = log_msg; *p; ++p) {
                 while (!(USART2->SR & USART_SR_TXE));
                 USART2->DR = *p;
             }
+            
+            // Log event to flash memory
+            log_session_event(EVENT_ROLL_CHANGE, datetime, session_rotations);
         }
 
-        // Short delay
-        for (volatile int i = 0; i < 10000; ++i); // Reduced delay for more frequent sampling
+        // Short delay 
+        for (volatile int i = 0; i < 5000; ++i); // Reduced for more responsive tracking
     }
 }
