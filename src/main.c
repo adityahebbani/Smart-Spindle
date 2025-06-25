@@ -524,6 +524,7 @@ int main(void) {
     int session_active = 0;
     float session_rotations = 0.0f;
     uint32_t last_motion_time = 0;
+    uint32_t current_time = 0;
 
     // Print startup message
     char log_msg[64];
@@ -564,6 +565,9 @@ int main(void) {
         if (delta_angle > M_PI)  delta_angle -= 2.0f * M_PI;
         if (delta_angle < -M_PI) delta_angle += 2.0f * M_PI;
 
+        // Get current time for timeout detection
+        current_time = getTimeMs();
+
         // Session and rotation tracking
         if (fabsf(delta_angle) > 0.05f) {
             if (!session_active) {
@@ -582,12 +586,23 @@ int main(void) {
             
             total_angle += delta_angle;
             session_rotations = fabsf(total_angle) / (2.0f * M_PI);
-            last_motion_time = getTimeMs();
+            last_motion_time = current_time;
         }
         prev_angle = angle;
 
+        // Session timeout debugging
+        if (session_active && (current_time % 1000 == 0)) {
+            char debug[64];
+            snprintf(debug, sizeof(debug), "Time since last motion: %lu ms\r\n", 
+                    (unsigned long)(current_time - last_motion_time));
+            for (const char *p = debug; *p; ++p) {
+                while (!(USART2->SR & USART_SR_TXE));
+                USART2->DR = *p;
+            }
+        }
+
         // Session timeout and logging
-        if (session_active && (getTimeMs() - last_motion_time > SESSION_TIMEOUT_MS)) {
+        if (session_active && (current_time - last_motion_time > SESSION_TIMEOUT_MS)) {
             session_active = 0;
             
             // Log session end with timestamp and rotation count
@@ -604,7 +619,7 @@ int main(void) {
             log_session_event(EVENT_ROLL_CHANGE, datetime, session_rotations);
         }
 
-        // Short delay 
-        for (volatile int i = 0; i < 5000; ++i); // Reduced for more responsive tracking
+        // Short delay - very short to allow more responsive timeout detection
+        for (volatile int i = 0; i < 1000; ++i); 
     }
 }
