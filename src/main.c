@@ -526,83 +526,51 @@ int main(void) {
     uint32_t last_motion_time = 0;
 
     while (1) {
-        adxl345_axes_t axes;
-        adxl345_read_axes(&axes);
+    adxl345_axes_t axes;
+    adxl345_read_axes(&axes);
 
-        // Print raw sensor values for debugging
-        char raw[64];
-        snprintf(raw, sizeof(raw), "X=%d Y=%d Z=%d\r\n", axes.x, axes.y, axes.z);
-        for (const char *p = raw; *p; ++p) {
-            while (!(USART2->SR & USART_SR_TXE));
-            USART2->DR = *p;
-        }
-
-        // Check for sensor error
-        if (axes.x == -9999) {
-            char err[] = "ADXL345 read error\r\n";
-            for (const char *p = err; *p; ++p) {
-                while (!(USART2->SR & USART_SR_TXE));
-                USART2->DR = *p;
-            }
-            // Try recovery
-            i2c_bus_recovery();
-            i2c1_init();
-            adxl345_init();
-            continue;
-        }
-
-        // Avoid atan2f(0,0) which can result in NaN
-        float angle = 0.0f;
-        if (axes.x != 0 || axes.y != 0) {
-            angle = atan2f((float)axes.y, (float)axes.x); // radians
-        }
-
-        float delta_angle = angle - prev_angle;
-        // Handle wrap-around
-        if (delta_angle > M_PI) delta_angle -= 2 * M_PI;
-        if (delta_angle < -M_PI) delta_angle += 2 * M_PI;
-
-        // Print angle and delta for debugging
-        char dbg[64];
-        snprintf(dbg, sizeof(dbg), "angle=%.2f delta=%.2f\r\n", angle, delta_angle);
-        for (const char *p = dbg; *p; ++p) {
-            while (!(USART2->SR & USART_SR_TXE));
-            USART2->DR = *p;
-        }
-
-        // Only count significant changes (filter noise)
-        if (fabsf(delta_angle) > 0.05f) { // 0.05 rad ~3 deg, adjust as needed
-            if (!session_active) {
-                session_active = 1;
-                session_rotations = 0.0f;
-                total_angle = 0.0f;
-                char msg[64];
-                snprintf(msg, sizeof(msg), "Session started\r\n");
-                for (const char *p = msg; *p; ++p) {
-                    while (!(USART2->SR & USART_SR_TXE));
-                    USART2->DR = *p;
-                }
-            }
-            total_angle += delta_angle;
-            session_rotations = total_angle / (2 * M_PI);
-            last_motion_time = getTimeMs();
-        }
-        prev_angle = angle;
-
-        // Session timeout logic
-        if (session_active && (getTimeMs() - last_motion_time > SESSION_TIMEOUT_MS)) {
-            session_active = 0;
-            char datetime[32];
-            rtc_get_datetime(datetime, sizeof(datetime));
-            char msg[128];
-            snprintf(msg, sizeof(msg), "[%s] Session ended. Rotations: %.2f\r\n", datetime, session_rotations);
-            for (const char *p = msg; *p; ++p) {
-                while (!(USART2->SR & USART_SR_TXE));
-                USART2->DR = *p;
-            }
-        }
-
-        // Short delay
-        for (volatile int i = 0; i < 20000; ++i);
+    if (axes.x == -9999) {
+        i2c_bus_recovery();
+        i2c1_init();
+        adxl345_init();
+        continue;
     }
+
+    // Always use atan2f to measure angle in X/Y plane
+    float angle = atan2f((float)axes.y, (float)axes.x);
+
+    float delta_angle = angle - prev_angle;
+    // Handle wrap
+    if (delta_angle > M_PI)  delta_angle -= 2.0f * M_PI;
+    if (delta_angle < -M_PI) delta_angle += 2.0f * M_PI;
+
+    // Accumulate total angle for session
+    if (fabsf(delta_angle) > 0.05f) {
+        if (!session_active) {
+            session_active = 1;
+            session_rotations = 0.0f;
+            total_angle = 0.0f;
+        }
+        total_angle += delta_angle;
+        session_rotations = total_angle / (2.0f * M_PI);
+        last_motion_time = getTimeMs();
+    }
+    prev_angle = angle;
+
+    // Session timeout
+    if (session_active && (getTimeMs() - last_motion_time > SESSION_TIMEOUT_MS)) {
+        session_active = 0;
+        char datetime[32];
+        rtc_get_datetime(datetime, sizeof(datetime));
+        char msg[128];
+        snprintf(msg, sizeof(msg), "[%s] Session ended. Rotations: %.2f\r\n",
+                 datetime, session_rotations);
+        for (const char *p = msg; *p; ++p) {
+            while (!(USART2->SR & USART_SR_TXE));
+            USART2->DR = *p;
+        }
+    }
+
+    // Short delay
+    for (volatile int i = 0; i < 20000; ++i);
 }
