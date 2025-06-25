@@ -519,12 +519,18 @@ int main(void) {
     // Systick timer for millisecond timing
     SysTick_Config(SystemCoreClock / 1000); // 1 ms tick
 
+    #define MOTION_THRESHOLD 50      // Min acceleration change to count as motion (adjust based on testing)
+    #define SESSION_TIMEOUT_MS 2000
+
     float prev_angle = 0.0f;
     float total_angle = 0.0f;
     int session_active = 0;
     float session_rotations = 0.0f;
     uint32_t last_motion_time = 0;
     uint32_t current_time = 0;
+
+    // Keep track of previous accelerometer readings
+    int16_t prev_x = 0, prev_y = 0, prev_z = 0;
 
     // Print startup message
     char log_msg[64];
@@ -556,6 +562,15 @@ int main(void) {
             USART2->DR = *p;
         }
         */
+
+        // Get current time for timeout detection
+        current_time = getTimeMs();
+
+        // Calculate total acceleration change (linear motion detection)
+        int16_t delta_x = axes.x - prev_x;
+        int16_t delta_y = axes.y - prev_y;
+        int16_t delta_z = axes.z - prev_z;
+        uint32_t total_delta = abs(delta_x) + abs(delta_y) + abs(delta_z);
         
         // Calculate angle for rotation tracking
         float angle = atan2f((float)axes.y, (float)axes.x);
@@ -565,11 +580,8 @@ int main(void) {
         if (delta_angle > M_PI)  delta_angle -= 2.0f * M_PI;
         if (delta_angle < -M_PI) delta_angle += 2.0f * M_PI;
 
-        // Get current time for timeout detection
-        current_time = getTimeMs();
-
-        // Session and rotation tracking
-        if (fabsf(delta_angle) > 0.05f) {
+        // Motion detection based on LINEAR acceleration
+        if (total_delta > MOTION_THRESHOLD) {
             if (!session_active) {
                 session_active = 1;
                 session_rotations = 0.0f;
@@ -584,42 +596,61 @@ int main(void) {
                 }
             }
             
+            // Still track rotation angle changes for rotation counting
             total_angle += delta_angle;
             session_rotations = fabsf(total_angle) / (2.0f * M_PI);
             last_motion_time = current_time;
         }
+        
+        // Update previous values
+        prev_x = axes.x;
+        prev_y = axes.y;
+        prev_z = axes.z;
         prev_angle = angle;
 
-        // Session timeout debugging
+        // Debug prints (once per second, only when session active)
         if (session_active && (current_time % 1000 == 0)) {
-            char debug[64];
-            snprintf(debug, sizeof(debug), "Time since last motion: %lu ms\r\n", 
-                    (unsigned long)(current_time - last_motion_time));
+            char debug[128];
+            snprintf(debug, sizeof(debug), 
+                    "Motion: %lu, Time since last: %lu ms, Rotations: %.2f\r\n", 
+                    (unsigned long)total_delta,
+                    (unsigned long)(current_time - last_motion_time),
+                    session_rotations);
             for (const char *p = debug; *p; ++p) {
                 while (!(USART2->SR & USART_SR_TXE));
                 USART2->DR = *p;
             }
         }
 
-        // Session timeout and logging
+        // Session timeout and logging (based on linear motion)
         if (session_active && (current_time - last_motion_time > SESSION_TIMEOUT_MS)) {
             session_active = 0;
             
-            // Log session end with timestamp and rotation count
-            rtc_get_datetime(datetime, sizeof(datetime));
-            snprintf(log_msg, sizeof(log_msg), 
-                     "[%s] Session ended. Rotations: %.2f\r\n", 
-                     datetime, session_rotations);
-            for (const char *p = log_msg; *p; ++p) {
-                while (!(USART2->SR & USART_SR_TXE));
-                USART2->DR = *p;
+            // Only log sessions with meaningful rotation
+            if (session_rotations > 0.25f) {  // At least 1/4 rotation to count
+                // Log session end with timestamp and rotation count
+                rtc_get_datetime(datetime, sizeof(datetime));
+                snprintf(log_msg, sizeof(log_msg), 
+                        "[%s] Session ended. Rotations: %.2f\r\n", 
+                        datetime, session_rotations);
+                for (const char *p = log_msg; *p; ++p) {
+                    while (!(USART2->SR & USART_SR_TXE));
+                    USART2->DR = *p;
+                }
+                
+                // Log event to flash memory
+                log_session_event(EVENT_ROLL_CHANGE, datetime, session_rotations);
+            } else {
+                // Short debug message for ignored sessions
+                char msg[] = "Session ignored (< 0.25 rotations)\r\n";
+                for (const char *p = msg; *p; ++p) {
+                    while (!(USART2->SR & USART_SR_TXE));
+                    USART2->DR = *p;
+                }
             }
-            
-            // Log event to flash memory
-            log_session_event(EVENT_ROLL_CHANGE, datetime, session_rotations);
         }
 
-        // Short delay - very short to allow more responsive timeout detection
+        // Short delay
         for (volatile int i = 0; i < 1000; ++i); 
     }
 }
