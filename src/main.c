@@ -529,6 +529,14 @@ int main(void) {
         adxl345_axes_t axes;
         adxl345_read_axes(&axes);
 
+        // Print raw sensor values for debugging
+        char raw[64];
+        snprintf(raw, sizeof(raw), "X=%d Y=%d Z=%d\r\n", axes.x, axes.y, axes.z);
+        for (const char *p = raw; *p; ++p) {
+            while (!(USART2->SR & USART_SR_TXE));
+            USART2->DR = *p;
+        }
+
         // Check for sensor error
         if (axes.x == -9999) {
             char err[] = "ADXL345 read error\r\n";
@@ -543,16 +551,18 @@ int main(void) {
             continue;
         }
 
-        // Calculate angle from X and Y
-        float angle = atan2f((float)axes.y, (float)axes.x); // radians
+        // Avoid atan2f(0,0) which can result in NaN
+        float angle = 0.0f;
+        if (axes.x != 0 || axes.y != 0) {
+            angle = atan2f((float)axes.y, (float)axes.x); // radians
+        }
 
-        // Calculate change in angle
         float delta_angle = angle - prev_angle;
         // Handle wrap-around
         if (delta_angle > M_PI) delta_angle -= 2 * M_PI;
         if (delta_angle < -M_PI) delta_angle += 2 * M_PI;
 
-        // Debug: print angle and delta
+        // Print angle and delta for debugging
         char dbg[64];
         snprintf(dbg, sizeof(dbg), "angle=%.2f delta=%.2f\r\n", angle, delta_angle);
         for (const char *p = dbg; *p; ++p) {
