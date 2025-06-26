@@ -8,6 +8,136 @@
 #define DS3231_ADDR 0x68
 #define ROTATION_THRESHOLD  10    // Adjust this threshold for your application
 #define SESSION_TIMEOUT_MS  2000   // 10 seconds
+#define UART_RX_BUFFER_SIZE 64
+
+/* UART Terminal commands */
+volatile char uartRxBuffer[UART_RX_BUFFER_SIZE];
+volatile uint8_t uartRxIndex = 0;
+volatile uint8_t cmdReady = 0;
+
+// Command definitions
+#define CMD_DUMP_DATA "dump"
+#define CMD_CLEAR_DATA "clear"
+#define CMD_HELP "help"
+
+// Initialize UART with receive capability
+void uart_init(void) {
+    // Enable GPIOA clock
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    // Enable USART2 clock
+    RCC->APB1ENR |= RCC_APB1ENR_USART2EN;
+    
+    // Set PA2 (TX) to alternate function (AF7)
+    GPIOA->MODER &= ~(0x3 << (2 * 2));
+    GPIOA->MODER |= (0x2 << (2 * 2));
+    GPIOA->AFR[0] &= ~(0xF << (2 * 4));
+    GPIOA->AFR[0] |= (0x7 << (2 * 4));
+    
+    // Set PA3 (RX) to alternate function (AF7)
+    GPIOA->MODER &= ~(0x3 << (3 * 2));
+    GPIOA->MODER |= (0x2 << (3 * 2));
+    GPIOA->AFR[0] &= ~(0xF << (3 * 4));
+    GPIOA->AFR[0] |= (0x7 << (3 * 4));
+    
+    // APB1 is 16 MHz by default
+    USART2->BRR = (uint16_t)(16000000 / 9600);
+    
+    // Enable transmitter, receiver, and RXNE interrupt
+    USART2->CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_RXNEIE | USART_CR1_UE;
+    
+    // Enable USART2 interrupt in NVIC
+    NVIC_EnableIRQ(USART2_IRQn);
+}
+
+// Print a string to UART
+void uart_print(const char *str) {
+    for (const char *p = str; *p; ++p) {
+        while (!(USART2->SR & USART_SR_TXE));
+        USART2->DR = *p;
+    }
+}
+
+// USART2 IRQ handler for receiving commands
+void USART2_IRQHandler(void) {
+    if (USART2->SR & USART_SR_RXNE) {
+        char c = USART2->DR;
+        
+        // Echo character back to terminal
+        while (!(USART2->SR & USART_SR_TXE));
+        USART2->DR = c;
+        
+        // Process character
+        if (c == '\r' || c == '\n') {
+            // Command terminator received
+            uartRxBuffer[uartRxIndex] = '\0';  // Null-terminate
+            cmdReady = 1;  // Set command ready flag
+
+            // Echo newline
+            uart_print("\r\n");
+            
+            // Process command
+            process_command((char*)uartRxBuffer);
+            
+            // Reset buffer
+            uartRxIndex = 0;
+        }
+        else if (c == 8 || c == 127) {  // Backspace or Delete
+            if (uartRxIndex > 0) {
+                uartRxIndex--;
+                
+                // Echo backspace sequence to clear character
+                uart_print("\b \b");
+            }
+        }
+        else if (uartRxIndex < UART_RX_BUFFER_SIZE - 1) {
+            uartRxBuffer[uartRxIndex++] = c;
+        }
+    }
+}
+
+// Process received command
+void process_command(const char* cmd) {
+    if (strcmp(cmd, "dump") == 0) {
+        print_session_history();
+        
+        char total[64];
+        snprintf(total, sizeof(total), "Total rotations: %.2f\r\n", get_total_rotations());
+        for (const char *p = total; *p; ++p) {
+            while (!(USART2->SR & USART_SR_TXE));
+            USART2->DR = *p;
+        }
+    }
+
+    // Command: clear - reset session history
+    else if (strcmp(cmd, "clear") == 0) {
+        sessionLogCount = 0;
+        sessionLogIndex = 0;
+        
+        char msg[] = "Session history cleared\r\n";
+        for (const char *p = msg; *p; ++p) {
+            while (!(USART2->SR & USART_SR_TXE));
+            USART2->DR = *p;
+        }
+    }
+    // Command: help - show available commands
+    else if (strcmp(cmd, "help") == 0) {
+        char help[] = "\r\nAvailable commands:\r\n"
+                      "  dump  - Print session history\r\n"
+                      "  clear - Clear session history\r\n"
+                      "  help  - Show this help message\r\n";
+        for (const char *p = help; *p; ++p) {
+            while (!(USART2->SR & USART_SR_TXE));
+            USART2->DR = *p;
+        }
+    }
+    else {
+        char unknown[] = "Unknown command. Type 'help' for available commands.\r\n";
+        for (const char *p = unknown; *p; ++p) {
+            while (!(USART2->SR & USART_SR_TXE));
+            USART2->DR = *p;
+        }
+    }
+}
 
 /* Logger */
 typedef enum { LOG_OFF, LOG_ERROR, LOG_INFO, LOG_DEBUG, LOG_SILLY } LogLevel;
@@ -454,7 +584,7 @@ int set_ds3231_time(uint16_t year, uint8_t month, uint8_t day, uint8_t weekday,
     return 0; // Success
 }
 
-// Dummy RTC function (replace with your actual RTC read)
+// RTC read
 void rtc_get_datetime(char *buf, size_t len) {
     uint8_t data[7] = {0};
     if (i2c1_read_bytes(DS3231_ADDR, 0x00, data, 7) == 0) {
@@ -470,6 +600,67 @@ void rtc_get_datetime(char *buf, size_t len) {
     }
 }
 
+/* Temporary memory of sections */
+// In-memory session log structure
+typedef struct {
+    char datetime[32];
+    float rotations;
+    uint32_t timestamp;
+} SessionLog;
+
+#define MAX_SESSION_LOGS 20  // Store last 20 sessions in volatile memory
+SessionLog sessionHistory[MAX_SESSION_LOGS];
+int sessionLogCount = 0;
+int sessionLogIndex = 0;  // Circular buffer index
+
+// Function to add a session to memory log
+void add_session_to_memory(const char* datetime, float rotations) {
+    // Use circular buffer approach to keep most recent sessions
+    strncpy(sessionHistory[sessionLogIndex].datetime, datetime, sizeof(sessionHistory[0].datetime));
+    sessionHistory[sessionLogIndex].rotations = rotations;
+    sessionHistory[sessionLogIndex].timestamp = getTimeMs();
+    
+    sessionLogIndex = (sessionLogIndex + 1) % MAX_SESSION_LOGS;
+    
+    // Increase count until buffer is full
+    if (sessionLogCount < MAX_SESSION_LOGS) {
+        sessionLogCount++;
+    }
+}
+
+// Function to print all sessions in memory
+void print_session_history(void) {
+    char header[] = "\r\n--- Session History ---\r\n";
+    for (const char *p = header; *p; ++p) {
+        while (!(USART2->SR & USART_SR_TXE));
+        USART2->DR = *p;
+    }
+    
+    // Start with oldest entry (when buffer is full)
+    int start = (sessionLogCount == MAX_SESSION_LOGS) ? sessionLogIndex : 0;
+    for (int i = 0; i < sessionLogCount; i++) {
+        int idx = (start + i) % MAX_SESSION_LOGS;
+        char entry[80];
+        snprintf(entry, sizeof(entry), "[%s] Rotations: %.2f\r\n",
+                sessionHistory[idx].datetime,
+                sessionHistory[idx].rotations);
+        
+        for (const char *p = entry; *p; ++p) {
+            while (!(USART2->SR & USART_SR_TXE));
+            USART2->DR = *p;
+        }
+    }
+}
+
+// Function to calculate total rotations across all sessions
+float get_total_rotations(void) {
+    float total = 0.0f;
+    for (int i = 0; i < sessionLogCount; i++) {
+        total += sessionHistory[i].rotations;
+    }
+    return total;
+}
+
 // --- Main function ---
 int main(void) {
     // Enable GPIOA clock
@@ -477,21 +668,9 @@ int main(void) {
     // Set PA5 as output (LED)
     GPIOA->MODER &= ~(0x3 << (5 * 2));
     GPIOA->MODER |= (0x1 << (5 * 2));
-    // Enable USART2 clock
-    RCC->APB1ENR |= RCC_APB1ENR_USART2EN;
-    // Set PA2 to alternate function (AF7)
-    GPIOA->MODER &= ~(0x3 << (2 * 2));
-    GPIOA->MODER |= (0x2 << (2 * 2));
-    GPIOA->AFR[0] &= ~(0xF << (2 * 4));
-    GPIOA->AFR[0] |= (0x7 << (2 * 4));
-    // Set PA3 to alternate function (AF7)
-    GPIOA->MODER &= ~(0x3 << (3 * 2));
-    GPIOA->MODER |= (0x2 << (3 * 2));
-    GPIOA->AFR[0] &= ~(0xF << (3 * 4));
-    GPIOA->AFR[0] |= (0x7 << (3 * 4));
-    // APB1 is 16 MHz by default
-    USART2->BRR = (uint16_t)(16000000 / 9600);
-    USART2->CR1 = USART_CR1_TE | USART_CR1_UE;
+    
+    // Initialize UART with receive capability
+    uart_init();
 
     // Blink LED a few times to show startup
     for (int i = 0; i < 5; ++i) {
@@ -511,16 +690,13 @@ int main(void) {
     uint8_t devid = adxl345_read_devid();
     char init_msg[40];
     snprintf(init_msg, sizeof(init_msg), "ADXL345 ID: 0x%02X (expect 0xE5)\r\n", devid);
-    for (const char *p = init_msg; *p; ++p) {
-        while (!(USART2->SR & USART_SR_TXE));
-        USART2->DR = *p;
-    }
+    uart_print(init_msg);
 
     // Systick timer for millisecond timing
     SysTick_Config(SystemCoreClock / 1000); // 1 ms tick
 
-    #define MOTION_THRESHOLD 50      // Min acceleration change to count as motion (adjust based on testing)
-    #define SESSION_TIMEOUT_MS 2000
+    #define MOTION_THRESHOLD 50      // Min acceleration change to count as motion
+    #define SESSION_TIMEOUT_MS 2000  // 2 seconds timeout
 
     float prev_angle = 0.0f;
     float total_angle = 0.0f;
@@ -537,10 +713,11 @@ int main(void) {
     char datetime[32];
     rtc_get_datetime(datetime, sizeof(datetime));
     snprintf(log_msg, sizeof(log_msg), "[%s] System ready\r\n", datetime);
-    for (const char *p = log_msg; *p; ++p) {
-        while (!(USART2->SR & USART_SR_TXE));
-        USART2->DR = *p;
-    }
+    uart_print(log_msg);
+
+    // Print command help
+    uart_print("\r\n--- Smart Spindle Ready ---\r\n");
+    uart_print("Type 'help' for available commands\r\n\r\n");
 
     while (1) {
         adxl345_axes_t axes;
@@ -552,16 +729,6 @@ int main(void) {
             adxl345_init();
             continue;
         }
-
-        // Comment out accelerometer raw data printing
-        /*
-        char raw[64];
-        snprintf(raw, sizeof(raw), "X=%d Y=%d Z=%d\r\n", axes.x, axes.y, axes.z);
-        for (const char *p = raw; *p; ++p) {
-            while (!(USART2->SR & USART_SR_TXE));
-            USART2->DR = *p;
-        }
-        */
 
         // Get current time for timeout detection
         current_time = getTimeMs();
@@ -590,10 +757,7 @@ int main(void) {
                 // Log session start with timestamp
                 rtc_get_datetime(datetime, sizeof(datetime));
                 snprintf(log_msg, sizeof(log_msg), "[%s] Session started\r\n", datetime);
-                for (const char *p = log_msg; *p; ++p) {
-                    while (!(USART2->SR & USART_SR_TXE));
-                    USART2->DR = *p;
-                }
+                uart_print(log_msg);
             }
             
             // Still track rotation angle changes for rotation counting
@@ -616,10 +780,7 @@ int main(void) {
                     (unsigned long)total_delta,
                     (unsigned long)(current_time - last_motion_time),
                     session_rotations);
-            for (const char *p = debug; *p; ++p) {
-                while (!(USART2->SR & USART_SR_TXE));
-                USART2->DR = *p;
-            }
+            uart_print(debug);
         }
 
         // Session timeout and logging (based on linear motion)
@@ -633,22 +794,22 @@ int main(void) {
                 snprintf(log_msg, sizeof(log_msg), 
                         "[%s] Session ended. Rotations: %.2f\r\n", 
                         datetime, session_rotations);
-                for (const char *p = log_msg; *p; ++p) {
-                    while (!(USART2->SR & USART_SR_TXE));
-                    USART2->DR = *p;
-                }
+                uart_print(log_msg);
+
+                // Save to session history
+                add_session_to_memory(datetime, session_rotations);
                 
                 // Log event to flash memory
                 log_session_event(EVENT_ROLL_CHANGE, datetime, session_rotations);
             } else {
                 // Short debug message for ignored sessions
-                char msg[] = "Session ignored (< 0.25 rotations)\r\n";
-                for (const char *p = msg; *p; ++p) {
-                    while (!(USART2->SR & USART_SR_TXE));
-                    USART2->DR = *p;
-                }
+                uart_print("Session ignored (< 0.25 rotations)\r\n");
             }
         }
+
+        // Check for command ready flag - this would be set in the USART2_IRQHandler
+        // Note: We don't need to check cmdReady here because our IRQ already processes commands
+        // This would be necessary if we moved complex command handling out of the interrupt
 
         // Short delay
         for (volatile int i = 0; i < 1000; ++i); 
