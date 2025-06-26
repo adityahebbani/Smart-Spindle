@@ -9,6 +9,13 @@
 #define ROTATION_THRESHOLD  10    // Adjust this threshold for your application
 #define SESSION_TIMEOUT_MS  2000   // 10 seconds
 
+/* Function Declarations */
+void process_command(const char* cmd);
+float get_total_rotations(void);
+void print_session_history(void);
+int i2c1_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data);
+int i2c1_read_bytes(uint8_t dev_addr, uint8_t reg, uint8_t *buf, uint8_t len);
+
 /* Logger */
 typedef enum { LOG_OFF, LOG_ERROR, LOG_INFO, LOG_DEBUG, LOG_SILLY } LogLevel;
 LogLevel log_level = LOG_INFO;
@@ -55,6 +62,118 @@ void internal_clock(void)
     RCC->CFGR &= ~RCC_CFGR_SW;
     RCC->CFGR |= RCC_CFGR_SW_PLL;
     while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_PLL);
+}
+
+/* RTC Logic */
+volatile uint32_t msTicks = 0;
+void SysTick_Handler(void) { msTicks++; }
+uint32_t getTimeMs(void) { return msTicks; }
+
+// Helper: Convert BCD to binary
+static uint8_t bcd2bin(uint8_t val) {
+    return (val >> 4) * 10 + (val & 0x0F);
+}
+
+// Helper: Convert binary to BCD
+static uint8_t bin2bcd(uint8_t val) {
+    return ((val / 10) << 4) | (val % 10);
+}
+
+int set_ds3231_time(uint16_t year, uint8_t month, uint8_t day, uint8_t weekday,
+                    uint8_t hour, uint8_t min, uint8_t sec) {
+    uint8_t data[7];
+    data[0] = bin2bcd(sec);
+    data[1] = bin2bcd(min);
+    data[2] = bin2bcd(hour);      // 24h mode
+    data[3] = bin2bcd(weekday);   // 1=Sunday, 7=Saturday
+    data[4] = bin2bcd(day);
+    data[5] = bin2bcd(month);
+    data[6] = bin2bcd(year % 100);
+
+    // Write all 7 bytes starting at register 0x00
+    for (int i = 0; i < 7; ++i) {
+        if (i2c1_write_reg(DS3231_ADDR, 0x00 + i, data[i]) != 0)
+            return -1; // Error
+    }
+    return 0; // Success
+}
+
+// RTC read
+void rtc_get_datetime(char *buf, size_t len) {
+    uint8_t data[7] = {0};
+    if (i2c1_read_bytes(DS3231_ADDR, 0x00, data, 7) == 0) {
+        uint8_t sec  = bcd2bin(data[0]);
+        uint8_t min  = bcd2bin(data[1]);
+        uint8_t hour = bcd2bin(data[2] & 0x3F); // 24h mode
+        uint8_t day  = bcd2bin(data[4]);
+        uint8_t mon  = bcd2bin(data[5] & 0x1F);
+        uint16_t year = 2000 + bcd2bin(data[6]);
+        snprintf(buf, len, "%04u-%02u-%02u %02u:%02u:%02u", year, mon, day, hour, min, sec);
+    } else {
+        snprintf(buf, len, "RTC ERROR");
+    }
+}
+
+/* Temporary memory handling */
+// In-memory session log structure
+typedef struct {
+    char datetime[32];
+    float rotations;
+    uint32_t timestamp;
+} SessionLog;
+
+#define MAX_SESSION_LOGS 20  // Store last 20 sessions in volatile memory
+SessionLog sessionHistory[MAX_SESSION_LOGS];
+int sessionLogCount = 0;
+int sessionLogIndex = 0;  // Circular buffer index
+
+// Function to add a session to memory log
+void add_session_to_memory(const char* datetime, float rotations) {
+    // Use circular buffer approach to keep most recent sessions
+    strncpy(sessionHistory[sessionLogIndex].datetime, datetime, sizeof(sessionHistory[0].datetime));
+    sessionHistory[sessionLogIndex].rotations = rotations;
+    sessionHistory[sessionLogIndex].timestamp = getTimeMs();
+    
+    sessionLogIndex = (sessionLogIndex + 1) % MAX_SESSION_LOGS;
+    
+    // Increase count until buffer is full
+    if (sessionLogCount < MAX_SESSION_LOGS) {
+        sessionLogCount++;
+    }
+}
+
+// Function to print all sessions in memory
+void print_session_history(void) {
+    char header[] = "\r\n--- Session History ---\r\n";
+    for (const char *p = header; *p; ++p) {
+        while (!(USART2->SR & USART_SR_TXE));
+        USART2->DR = *p;
+    }
+    
+    // Start with oldest entry (when buffer is full)
+    int start = (sessionLogCount == MAX_SESSION_LOGS) ? sessionLogIndex : 0;
+    for (int i = 0; i < sessionLogCount; i++) {
+        int idx = (start + i) % MAX_SESSION_LOGS;
+        char entry[80];
+        snprintf(entry, sizeof(entry), "[%s] Rotations: %.2f\r\n",
+                sessionHistory[idx].datetime,
+                sessionHistory[idx].rotations);
+        
+        for (const char *p = entry; *p; ++p) {
+            while (!(USART2->SR & USART_SR_TXE));
+            USART2->DR = *p;
+        }
+    }
+}
+
+/* Rotation logic */
+// Function to calculate total rotations across all sessions
+float get_total_rotations(void) {
+    float total = 0.0f;
+    for (int i = 0; i < sessionLogCount; i++) {
+        total += sessionHistory[i].rotations;
+    }
+    return total;
 }
 
 /* UART Terminal commands */
@@ -105,44 +224,6 @@ void uart_print(const char *str) {
     }
 }
 
-// USART2 IRQ handler for receiving commands
-void USART2_IRQHandler(void) {
-    if (USART2->SR & USART_SR_RXNE) {
-        char c = USART2->DR;
-        
-        // Echo character back to terminal
-        while (!(USART2->SR & USART_SR_TXE));
-        USART2->DR = c;
-        
-        // Process character
-        if (c == '\r' || c == '\n') {
-            // Command terminator received
-            uartRxBuffer[uartRxIndex] = '\0';  // Null-terminate
-            cmdReady = 1;  // Set command ready flag
-
-            // Echo newline
-            uart_print("\r\n");
-            
-            // Process command
-            process_command((char*)uartRxBuffer);
-            
-            // Reset buffer
-            uartRxIndex = 0;
-        }
-        else if (c == 8 || c == 127) {  // Backspace or Delete
-            if (uartRxIndex > 0) {
-                uartRxIndex--;
-                
-                // Echo backspace sequence to clear character
-                uart_print("\b \b");
-            }
-        }
-        else if (uartRxIndex < UART_RX_BUFFER_SIZE - 1) {
-            uartRxBuffer[uartRxIndex++] = c;
-        }
-    }
-}
-
 // Process received command
 void process_command(const char* cmd) {
     if (strcmp(cmd, "dump") == 0) {
@@ -186,6 +267,46 @@ void process_command(const char* cmd) {
         }
     }
 }
+
+// USART2 IRQ handler for receiving commands
+void USART2_IRQHandler(void) {
+    if (USART2->SR & USART_SR_RXNE) {
+        char c = USART2->DR;
+        
+        // Echo character back to terminal
+        while (!(USART2->SR & USART_SR_TXE));
+        USART2->DR = c;
+        
+        // Process character
+        if (c == '\r' || c == '\n') {
+            // Command terminator received
+            uartRxBuffer[uartRxIndex] = '\0';  // Null-terminate
+            cmdReady = 1;  // Set command ready flag
+
+            // Echo newline
+            uart_print("\r\n");
+            
+            // Process command
+            process_command((char*)uartRxBuffer);
+            
+            // Reset buffer
+            uartRxIndex = 0;
+        }
+        else if (c == 8 || c == 127) {  // Backspace or Delete
+            if (uartRxIndex > 0) {
+                uartRxIndex--;
+                
+                // Echo backspace sequence to clear character
+                uart_print("\b \b");
+            }
+        }
+        else if (uartRxIndex < UART_RX_BUFFER_SIZE - 1) {
+            uartRxBuffer[uartRxIndex++] = c;
+        }
+    }
+}
+
+
 
 /* Flash memory handling */
 #define FLASH_LOG_SECTOR   7  // Use sector 7 (last 128KB of 512KB flash)
@@ -550,119 +671,8 @@ uint8_t adxl345_read_devid(void) {
     return devid;
 }
 
-/* RTC Logic */
-volatile uint32_t msTicks = 0;
-void SysTick_Handler(void) { msTicks++; }
-uint32_t getTimeMs(void) { return msTicks; }
-
-// Helper: Convert BCD to binary
-static uint8_t bcd2bin(uint8_t val) {
-    return (val >> 4) * 10 + (val & 0x0F);
-}
-
-// Helper: Convert binary to BCD
-static uint8_t bin2bcd(uint8_t val) {
-    return ((val / 10) << 4) | (val % 10);
-}
-
-int set_ds3231_time(uint16_t year, uint8_t month, uint8_t day, uint8_t weekday,
-                    uint8_t hour, uint8_t min, uint8_t sec) {
-    uint8_t data[7];
-    data[0] = bin2bcd(sec);
-    data[1] = bin2bcd(min);
-    data[2] = bin2bcd(hour);      // 24h mode
-    data[3] = bin2bcd(weekday);   // 1=Sunday, 7=Saturday
-    data[4] = bin2bcd(day);
-    data[5] = bin2bcd(month);
-    data[6] = bin2bcd(year % 100);
-
-    // Write all 7 bytes starting at register 0x00
-    for (int i = 0; i < 7; ++i) {
-        if (i2c1_write_reg(DS3231_ADDR, 0x00 + i, data[i]) != 0)
-            return -1; // Error
-    }
-    return 0; // Success
-}
-
-// RTC read
-void rtc_get_datetime(char *buf, size_t len) {
-    uint8_t data[7] = {0};
-    if (i2c1_read_bytes(DS3231_ADDR, 0x00, data, 7) == 0) {
-        uint8_t sec  = bcd2bin(data[0]);
-        uint8_t min  = bcd2bin(data[1]);
-        uint8_t hour = bcd2bin(data[2] & 0x3F); // 24h mode
-        uint8_t day  = bcd2bin(data[4]);
-        uint8_t mon  = bcd2bin(data[5] & 0x1F);
-        uint16_t year = 2000 + bcd2bin(data[6]);
-        snprintf(buf, len, "%04u-%02u-%02u %02u:%02u:%02u", year, mon, day, hour, min, sec);
-    } else {
-        snprintf(buf, len, "RTC ERROR");
-    }
-}
-
 /* Light sensor initialization */
 
-/* Temporary memory handling */
-// In-memory session log structure
-typedef struct {
-    char datetime[32];
-    float rotations;
-    uint32_t timestamp;
-} SessionLog;
-
-#define MAX_SESSION_LOGS 20  // Store last 20 sessions in volatile memory
-SessionLog sessionHistory[MAX_SESSION_LOGS];
-int sessionLogCount = 0;
-int sessionLogIndex = 0;  // Circular buffer index
-
-// Function to add a session to memory log
-void add_session_to_memory(const char* datetime, float rotations) {
-    // Use circular buffer approach to keep most recent sessions
-    strncpy(sessionHistory[sessionLogIndex].datetime, datetime, sizeof(sessionHistory[0].datetime));
-    sessionHistory[sessionLogIndex].rotations = rotations;
-    sessionHistory[sessionLogIndex].timestamp = getTimeMs();
-    
-    sessionLogIndex = (sessionLogIndex + 1) % MAX_SESSION_LOGS;
-    
-    // Increase count until buffer is full
-    if (sessionLogCount < MAX_SESSION_LOGS) {
-        sessionLogCount++;
-    }
-}
-
-// Function to print all sessions in memory
-void print_session_history(void) {
-    char header[] = "\r\n--- Session History ---\r\n";
-    for (const char *p = header; *p; ++p) {
-        while (!(USART2->SR & USART_SR_TXE));
-        USART2->DR = *p;
-    }
-    
-    // Start with oldest entry (when buffer is full)
-    int start = (sessionLogCount == MAX_SESSION_LOGS) ? sessionLogIndex : 0;
-    for (int i = 0; i < sessionLogCount; i++) {
-        int idx = (start + i) % MAX_SESSION_LOGS;
-        char entry[80];
-        snprintf(entry, sizeof(entry), "[%s] Rotations: %.2f\r\n",
-                sessionHistory[idx].datetime,
-                sessionHistory[idx].rotations);
-        
-        for (const char *p = entry; *p; ++p) {
-            while (!(USART2->SR & USART_SR_TXE));
-            USART2->DR = *p;
-        }
-    }
-}
-
-/* Rotation logic */
-// Function to calculate total rotations across all sessions
-float get_total_rotations(void) {
-    float total = 0.0f;
-    for (int i = 0; i < sessionLogCount; i++) {
-        total += sessionHistory[i].rotations;
-    }
-    return total;
-}
 
 // --- Main function ---
 int main(void) {
