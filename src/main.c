@@ -8,9 +8,57 @@
 #define DS3231_ADDR 0x68
 #define ROTATION_THRESHOLD  10    // Adjust this threshold for your application
 #define SESSION_TIMEOUT_MS  2000   // 10 seconds
-#define UART_RX_BUFFER_SIZE 64
+
+/* Logger */
+typedef enum { LOG_OFF, LOG_ERROR, LOG_INFO, LOG_DEBUG, LOG_SILLY } LogLevel;
+LogLevel log_level = LOG_INFO;
+
+void logger(LogLevel level, const char* msg) {
+    if (level <= log_level) {
+        printf("%s\n", msg);
+    }
+}
+
+// Event types
+typedef enum { EVENT_ROLL_CHANGE, EVENT_DISPENSE } EventType;
+
+typedef struct {
+    EventType type;
+    char date[16]; // YYMMDDhhmmss
+    float revs;
+} Event;
+
+#define MAX_EVENTS 32
+Event eventArray[MAX_EVENTS];
+int eventCount = 0;
+
+/* Internal clock set to 84 MHz */
+void internal_clock(void)
+{
+    // Enable HSI
+    RCC->CR |= RCC_CR_HSION;
+    while ((RCC->CR & RCC_CR_HSIRDY) == 0);
+
+    // Configure Flash prefetch, Instruction cache, Data cache and wait state
+    FLASH->ACR = FLASH_ACR_ICEN | FLASH_ACR_DCEN | FLASH_ACR_PRFTEN | FLASH_ACR_LATENCY_2WS;
+
+    // Configure PLL: PLLCLK = (HSI/16) * 336 / 4 = 84 MHz
+    RCC->PLLCFGR = (16 << RCC_PLLCFGR_PLLM_Pos) | (336 << RCC_PLLCFGR_PLLN_Pos) |
+                   (0 << RCC_PLLCFGR_PLLP_Pos) | (RCC_PLLCFGR_PLLSRC_HSI) |
+                   (7 << RCC_PLLCFGR_PLLQ_Pos);
+
+    // Enable PLL
+    RCC->CR |= RCC_CR_PLLON;
+    while ((RCC->CR & RCC_CR_PLLRDY) == 0);
+
+    // Select PLL as system clock source
+    RCC->CFGR &= ~RCC_CFGR_SW;
+    RCC->CFGR |= RCC_CFGR_SW_PLL;
+    while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_PLL);
+}
 
 /* UART Terminal commands */
+#define UART_RX_BUFFER_SIZE 64
 volatile char uartRxBuffer[UART_RX_BUFFER_SIZE];
 volatile uint8_t uartRxIndex = 0;
 volatile uint8_t cmdReady = 0;
@@ -139,54 +187,6 @@ void process_command(const char* cmd) {
     }
 }
 
-/* Logger */
-typedef enum { LOG_OFF, LOG_ERROR, LOG_INFO, LOG_DEBUG, LOG_SILLY } LogLevel;
-LogLevel log_level = LOG_INFO;
-
-void logger(LogLevel level, const char* msg) {
-    if (level <= log_level) {
-        printf("%s\n", msg);
-    }
-}
-
-// Event types
-typedef enum { EVENT_ROLL_CHANGE, EVENT_DISPENSE } EventType;
-
-typedef struct {
-    EventType type;
-    char date[16]; // YYMMDDhhmmss
-    float revs;
-} Event;
-
-#define MAX_EVENTS 32
-Event eventArray[MAX_EVENTS];
-int eventCount = 0;
-
-/* Internal clock set to 84 MHz */
-void internal_clock(void)
-{
-    // Enable HSI
-    RCC->CR |= RCC_CR_HSION;
-    while ((RCC->CR & RCC_CR_HSIRDY) == 0);
-
-    // Configure Flash prefetch, Instruction cache, Data cache and wait state
-    FLASH->ACR = FLASH_ACR_ICEN | FLASH_ACR_DCEN | FLASH_ACR_PRFTEN | FLASH_ACR_LATENCY_2WS;
-
-    // Configure PLL: PLLCLK = (HSI/16) * 336 / 4 = 84 MHz
-    RCC->PLLCFGR = (16 << RCC_PLLCFGR_PLLM_Pos) | (336 << RCC_PLLCFGR_PLLN_Pos) |
-                   (0 << RCC_PLLCFGR_PLLP_Pos) | (RCC_PLLCFGR_PLLSRC_HSI) |
-                   (7 << RCC_PLLCFGR_PLLQ_Pos);
-
-    // Enable PLL
-    RCC->CR |= RCC_CR_PLLON;
-    while ((RCC->CR & RCC_CR_PLLRDY) == 0);
-
-    // Select PLL as system clock source
-    RCC->CFGR &= ~RCC_CFGR_SW;
-    RCC->CFGR |= RCC_CFGR_SW_PLL;
-    while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_PLL);
-}
-
 /* Flash memory handling */
 #define FLASH_LOG_SECTOR   7  // Use sector 7 (last 128KB of 512KB flash)
 #define FLASH_LOG_ADDRESS  0x08060000  // Start of sector 7
@@ -243,7 +243,7 @@ void flash_log_append(Event *event) {
     flash_write_event(addr, event);
 }
 
-// Example: log an event (call this from your interrupt/session handler)
+// Example: log an event (call this from your interrupt/session handler) - REWRITE
 void log_session_event(EventType type, const char *date, float revs) {
     Event ev;
     ev.type = type;
@@ -600,7 +600,9 @@ void rtc_get_datetime(char *buf, size_t len) {
     }
 }
 
-/* Temporary memory of sections */
+/* Light sensor initialization */
+
+/* Temporary memory handling */
 // In-memory session log structure
 typedef struct {
     char datetime[32];
@@ -652,6 +654,7 @@ void print_session_history(void) {
     }
 }
 
+/* Rotation logic */
 // Function to calculate total rotations across all sessions
 float get_total_rotations(void) {
     float total = 0.0f;
@@ -695,6 +698,8 @@ int main(void) {
     // Systick timer for millisecond timing
     SysTick_Config(SystemCoreClock / 1000); // 1 ms tick
 
+
+    /* Read and rotation logic from ADXL */
     #define MOTION_THRESHOLD 50      // Min acceleration change to count as motion
     #define SESSION_TIMEOUT_MS 2000  // 2 seconds timeout
 
