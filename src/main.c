@@ -5,9 +5,24 @@
 #include <math.h>
 #include <stdint.h>
 
+// Define M_PI if not already defined
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #define DS3231_ADDR 0x68
-#define ROTATION_THRESHOLD  10    // Adjust this threshold for your application
-#define SESSION_TIMEOUT_MS  2000   // 10 seconds
+#define MPU6050_ADDR 0x69      // MPU6050 I2C address (AD0 = 1) - NOTE: Tie AD0 pin HIGH to avoid conflict with DS3231
+#define MPU6050_WHO_AM_I 0x75  // Device ID register
+#define MPU6050_PWR_MGMT_1 0x6B // Power management register
+#define MPU6050_GYRO_CONFIG 0x1B // Gyroscope configuration
+#define MPU6050_GYRO_ZOUT_H 0x47 // Gyroscope Z-axis high byte
+#define MPU6050_GYRO_ZOUT_L 0x48 // Gyroscope Z-axis low byte
+
+// Constants from original Espruino code
+#define PUCK_GYRO_CONSTANT 600000.0f  // Magic constant for gyro to revolutions conversion
+#define PULL_REV_THRESHOLD 0.1f       // Minimum revolution change to register movement
+#define PULL_TIMEOUT_MS 1000          // Timeout for pull end detection
+#define SESSION_TIMEOUT_MS 120000     // 2 minutes session timeout (like original)
 
 /* Function Declarations */
 void process_command(const char* cmd);
@@ -373,7 +388,7 @@ void log_session_event(EventType type, const char *date, float revs) {
     flash_log_append(&ev);
 }
 
-// --- I2C1 (PB8=SCL, PB9=SDA) setup for accelerometer ---
+// --- I2C1 (PB8=SCL, PB9=SDA) setup for MPU6050 gyroscope ---
 void i2c1_init(void) {
     // Reset I2C1 peripheral
     RCC->APB1RSTR |= RCC_APB1RSTR_I2C1RST;
@@ -399,8 +414,18 @@ void i2c1_init(void) {
     I2C1->CR1 |= I2C_CR1_PE;
 }
 
-// --- ADXL345 I2C address (SDO=GND) ---
-#define ADXL345_ADDR 0x53
+// --- MPU6050 I2C address (AD0=GND) ---
+#define MPU6050_ADDR 0x68
+
+// MPU6050 Register Addresses
+#define MPU6050_PWR_MGMT_1   0x6B
+#define MPU6050_GYRO_CONFIG  0x1B
+#define MPU6050_ACCEL_CONFIG 0x1C
+#define MPU6050_GYRO_XOUT_H  0x43
+#define MPU6050_WHO_AM_I     0x75
+
+// Gyroscope constants for rotation calculation
+#define MPU6050_GYRO_CONSTANT 600000.0f  // From old.js reference
 
 // --- I2C1 Write/Read helpers ---
 int i2c1_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data) {
@@ -579,54 +604,53 @@ void i2c_bus_recovery(void) {
     GPIOB->MODER |= (0x2 << (8 * 2)) | (0x2 << (9 * 2));
 }
 
-// --- ADXL345 Initialization ---
-void adxl345_init(void) {
-    // Reset the device
-    i2c1_write_reg(ADXL345_ADDR, 0x2D, 0x00); // Reset POWER_CTL
+// --- MPU6050 Initialization ---
+void mpu6050_init(void) {
+    // Wake up the MPU6050 (default is sleep mode)
+    i2c1_write_reg(MPU6050_ADDR, MPU6050_PWR_MGMT_1, 0x00);
     
-    // Verify device ID (should be 0xE5)
+    // Verify device ID (should be 0x69 when AD0=1)
     uint8_t devid = 0;
-    if (i2c1_read_bytes(ADXL345_ADDR, 0x00, &devid, 1) == 0) {
-        if (devid != 0xE5) {
+    if (i2c1_read_bytes(MPU6050_ADDR, MPU6050_WHO_AM_I, &devid, 1) == 0) {
+        if (devid != 0x69) {
             // Device ID is wrong - try bus recovery
             i2c_bus_recovery();
             i2c1_init();
         }
     }
     
-    // Configure data format: full resolution, +/- 8g (DATA_FORMAT = 0x31, value = 0x0B)
-    i2c1_write_reg(ADXL345_ADDR, 0x31, 0x0B);
+    // Configure gyroscope range: +/- 250 degrees/sec (most sensitive)
+    i2c1_write_reg(MPU6050_ADDR, MPU6050_GYRO_CONFIG, 0x00);
     
-    // Set BW_RATE to 100 Hz (0x0A)
-    i2c1_write_reg(ADXL345_ADDR, 0x2C, 0x0A);
-    
-    // Enable measurement mode (POWER_CTL = 0x2D, value = 0x08)
-    i2c1_write_reg(ADXL345_ADDR, 0x2D, 0x08);
-    
-    // Optionally enable FIFO in stream mode for better reading stability
-    i2c1_write_reg(ADXL345_ADDR, 0x38, 0x80); // FIFO_CTL: Stream mode
+    // Additional delay for stability
+    for (volatile int i = 0; i < 100000; i++);
 }
 
-// --- Read acceleration data (X, Y, Z) ---
-typedef struct { int16_t x, y, z; } adxl345_axes_t;
+// --- Read gyroscope Z-axis data ---
+typedef struct { 
+    int16_t z;     // Only Z-axis needed for rotation tracking
+    float z_dps;   // Z-axis in degrees per second
+} mpu6050_gyro_t;
 
-void adxl345_read_axes(adxl345_axes_t *axes) {
-    uint8_t buf[6];
-    int result = i2c1_read_bytes(ADXL345_ADDR, 0x32, buf, 6);
+void mpu6050_read_gyro_z(mpu6050_gyro_t *gyro) {
+    uint8_t buf[2];
+    int result = i2c1_read_bytes(MPU6050_ADDR, MPU6050_GYRO_ZOUT_H, buf, 2);
     if (result != 0) {
-        // On error, set values to a recognizable pattern
-        axes->x = -9999;
-        axes->y = -9999;
-        axes->z = -9999;
+        // On error, set values to zero
+        gyro->z = 0;
+        gyro->z_dps = 0.0f;
         return;
     }
-    axes->x = (int16_t)(buf[1] << 8 | buf[0]);
-    axes->y = (int16_t)(buf[3] << 8 | buf[2]);
-    axes->z = (int16_t)(buf[5] << 8 | buf[4]);
+    
+    // Combine high and low bytes
+    gyro->z = (int16_t)(buf[0] << 8 | buf[1]);
+    
+    // Convert to degrees per second (for ±250°/s range: LSB = 131 LSB/°/s)
+    gyro->z_dps = (float)gyro->z / 131.0f;
 }
 
-// --- Accelerometer INT pin (e.g., PC0) as external interrupt ---
-void accel_int_init(void) {
+// --- Gyroscope INT pin (e.g., PC0) as external interrupt ---
+void gyro_int_init(void) {
     // Enable GPIOC clock
     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
     // Set PC0 as input (default)
@@ -644,29 +668,29 @@ void accel_int_init(void) {
     NVIC_EnableIRQ(EXTI0_IRQn);
 }
 
-// --- EXTI0 IRQ Handler (called on accelerometer interrupt) ---
+// --- EXTI0 IRQ Handler (called on gyroscope interrupt) ---
 void EXTI0_IRQHandler(void) {
     if (EXTI->PR & EXTI_PR_PR0) {
         EXTI->PR = EXTI_PR_PR0; // Clear pending bit
-        // TODO: Handle accelerometer event (read data, log, etc.)
-        logger(LOG_INFO, "Accelerometer interrupt!");
-        // Read and print axes
-        adxl345_axes_t axes;
-        adxl345_read_axes(&axes);
+        // Handle gyroscope event (read data, log, etc.)
+        logger(LOG_INFO, "Gyroscope interrupt!");
+        // Read and print gyro Z-axis
+        mpu6050_gyro_t gyro;
+        mpu6050_read_gyro_z(&gyro);
         char msg[64];
-        snprintf(msg, sizeof(msg), "ADXL345: X=%d Y=%d Z=%d", axes.x, axes.y, axes.z);
+        snprintf(msg, sizeof(msg), "MPU6050 Gyro Z: %d (%.2f dps)", gyro.z, gyro.z_dps);
         logger(LOG_INFO, msg);
     }
 }
 
-// --- Test: Read and print ADXL345 DEVID register ---
-uint8_t adxl345_read_devid(void) {
+// --- Test: Read and print MPU6050 WHO_AM_I register ---
+uint8_t mpu6050_read_devid(void) {
     uint8_t devid = 0;
-    if (i2c1_read_bytes(ADXL345_ADDR, 0x00, &devid, 1) != 0) {
+    if (i2c1_read_bytes(MPU6050_ADDR, MPU6050_WHO_AM_I, &devid, 1) != 0) {
         // Communication error - try recovery
         i2c_bus_recovery();
         i2c1_init();
-        i2c1_read_bytes(ADXL345_ADDR, 0x00, &devid, 1);
+        i2c1_read_bytes(MPU6050_ADDR, MPU6050_WHO_AM_I, &devid, 1);
     }
     return devid;
 }
@@ -691,83 +715,79 @@ int main(void) {
         for (volatile int j = 0; j < 800000; ++j);
     }
 
-    // I2C and ADXL345 init
+    // I2C and MPU6050 init
     i2c1_init();
     for (volatile int i = 0; i < 1600000; ++i);
-    adxl345_init();
+    mpu6050_init();
     for (volatile int i = 0; i < 1600000; ++i);
 
     set_ds3231_time(2025, 6, 24, 2, 14, 30, 0);
 
-    // Check device ID - should be 0xE5 for ADXL345
-    uint8_t devid = adxl345_read_devid();
-    char init_msg[40];
-    snprintf(init_msg, sizeof(init_msg), "ADXL345 ID: 0x%02X (expect 0xE5)\r\n", devid);
+    // Check device ID - should be 0x69 for MPU6050 (when AD0=1)
+    uint8_t devid = mpu6050_read_devid();
+    char init_msg[50];
+    snprintf(init_msg, sizeof(init_msg), "MPU6050 ID: 0x%02X (expect 0x69 with AD0=1)\r\n", devid);
     uart_print(init_msg);
 
     // Systick timer for millisecond timing
     SysTick_Config(SystemCoreClock / 1000); // 1 ms tick
 
 
-    /* Read and rotation logic from ADXL */
-    #define MOTION_THRESHOLD 50      // Min acceleration change to count as motion
-    #define SESSION_TIMEOUT_MS 2000  // 2 seconds timeout
-
-    float prev_angle = 0.0f;
-    float total_angle = 0.0f;
-    int session_active = 0;
-    float session_rotations = 0.0f;
-    uint32_t last_motion_time = 0;
-    uint32_t current_time = 0;
-
-    // Keep track of previous accelerometer readings
-    int16_t prev_x = 0, prev_y = 0, prev_z = 0;
+    /* Gyroscope-based rotation tracking logic (from old.js) */
+    
+    // Rotation tracking variables
+    float pullRevolutions = 0.0f;         // Current pull revolutions
+    float previousPullRevolutions = 0.0f; // Previous pull revolutions  
+    float sessionRevolutions = 0.0f;      // Total session revolutions
+    int session_active = 0;               // Session state
+    uint32_t last_motion_time = 0;        // Last motion timestamp
+    uint32_t current_time = 0;            // Current time
+    uint32_t pull_timeout_start = 0;      // Pull timeout tracking
 
     // Print startup message
-    char log_msg[64];
+    char log_msg[128];
     char datetime[32];
     rtc_get_datetime(datetime, sizeof(datetime));
-    snprintf(log_msg, sizeof(log_msg), "[%s] System ready\r\n", datetime);
+    snprintf(log_msg, sizeof(log_msg), "[%s] Smart Spindle Ready (Gyroscope Mode)\r\n", datetime);
     uart_print(log_msg);
 
     // Print command help
-    uart_print("\r\n--- Smart Spindle Ready ---\r\n");
     uart_print("Type 'help' for available commands\r\n\r\n");
 
     while (1) {
-        adxl345_axes_t axes;
-        adxl345_read_axes(&axes);
+        mpu6050_gyro_t gyro;
+        mpu6050_read_gyro_z(&gyro);
 
-        if (axes.x == -9999) {
-            i2c_bus_recovery();
-            i2c1_init();
-            adxl345_init();
+        // Check for sensor error (Z = 0 might indicate communication error)
+        if (gyro.z == 0 && gyro.z_dps == 0.0f) {
+            // Try sensor recovery (but don't flood with recovery attempts)
+            static uint32_t last_recovery = 0;
+            current_time = getTimeMs();
+            if (current_time - last_recovery > 5000) { // Try recovery every 5 seconds
+                i2c_bus_recovery();
+                i2c1_init();
+                mpu6050_init();
+                last_recovery = current_time;
+            }
             continue;
         }
 
         // Get current time for timeout detection
         current_time = getTimeMs();
 
-        // Calculate total acceleration change (linear motion detection)
-        int16_t delta_x = axes.x - prev_x;
-        int16_t delta_y = axes.y - prev_y;
-        int16_t delta_z = axes.z - prev_z;
-        uint32_t total_delta = abs(delta_x) + abs(delta_y) + abs(delta_z);
+        // Add gyroscope Z data to revolution counter (from old.js logic)
+        // pullRevolutions += data.gyro.z / PUCK_GYRO_CONSTANT;
+        pullRevolutions += (float)gyro.z / PUCK_GYRO_CONSTANT;
         
-        // Calculate angle for rotation tracking
-        float angle = atan2f((float)axes.y, (float)axes.x);
-        float delta_angle = angle - prev_angle;
+        // Check if spindle is moving (meaningful rotation change)
+        float revolution_delta = fabsf(pullRevolutions - previousPullRevolutions);
+        int spindleIsMoving = (revolution_delta > PULL_REV_THRESHOLD);
         
-        // Handle wrap-around
-        if (delta_angle > M_PI)  delta_angle -= 2.0f * M_PI;
-        if (delta_angle < -M_PI) delta_angle += 2.0f * M_PI;
-
-        // Motion detection based on LINEAR acceleration
-        if (total_delta > MOTION_THRESHOLD) {
+        if (spindleIsMoving) {
+            // Movement detected - manage session and pull timeouts
             if (!session_active) {
                 session_active = 1;
-                session_rotations = 0.0f;
-                total_angle = 0.0f;
+                sessionRevolutions = 0.0f;
                 
                 // Log session start with timestamp
                 rtc_get_datetime(datetime, sizeof(datetime));
@@ -775,58 +795,76 @@ int main(void) {
                 uart_print(log_msg);
             }
             
-            // Still track rotation angle changes for rotation counting
-            total_angle += delta_angle;
-            session_rotations = fabsf(total_angle) / (2.0f * M_PI);
+            // Update motion time and pull timeout
             last_motion_time = current_time;
+            pull_timeout_start = current_time;
+            previousPullRevolutions = pullRevolutions;
+            
+            // Debug output (every 500ms during motion)
+            static uint32_t last_debug = 0;
+            if (current_time - last_debug > 500) {
+                snprintf(log_msg, sizeof(log_msg), 
+                        "Gyro Z: %d (%.2f dps), Pull revs: %.3f, Session revs: %.3f\r\n", 
+                        gyro.z, gyro.z_dps, pullRevolutions, sessionRevolutions);
+                uart_print(log_msg);
+                last_debug = current_time;
+            }
         }
         
-        // Update previous values
-        prev_x = axes.x;
-        prev_y = axes.y;
-        prev_z = axes.z;
-        prev_angle = angle;
-
-        // Debug prints (once per second, only when session active)
-        if (session_active && (current_time % 1000 == 0)) {
-            char debug[128];
-            snprintf(debug, sizeof(debug), 
-                    "Motion: %lu, Time since last: %lu ms, Rotations: %.2f\r\n", 
-                    (unsigned long)total_delta,
-                    (unsigned long)(current_time - last_motion_time),
-                    session_rotations);
-            uart_print(debug);
+        // Pull timeout handling (like onPullEnd in old.js)
+        if (session_active && pull_timeout_start > 0 && 
+            (current_time - pull_timeout_start > PULL_TIMEOUT_MS)) {
+            
+            // Round revolutions to nearest quarter
+            float roundedRevolutions = roundf(pullRevolutions * 4.0f) / 4.0f;
+            
+            if (fabsf(roundedRevolutions) > 0.25f) {  // Ignore very small movements
+                snprintf(log_msg, sizeof(log_msg), 
+                        "Pull end: %.2f revolutions\r\n", roundedRevolutions);
+                uart_print(log_msg);
+                
+                // Add to session total (allowing negative for rewinding)
+                sessionRevolutions += roundedRevolutions;
+            }
+            
+            // Reset pull tracking
+            pullRevolutions = 0.0f;
+            previousPullRevolutions = 0.0f;
+            pull_timeout_start = 0;
         }
 
-        // Session timeout and logging (based on linear motion)
+        // Session timeout handling (like onSessionEnd in old.js)
         if (session_active && (current_time - last_motion_time > SESSION_TIMEOUT_MS)) {
             session_active = 0;
             
             // Only log sessions with meaningful rotation
-            if (session_rotations > 0.25f) {  // At least 1/4 rotation to count
+            float absSessionRevs = fabsf(sessionRevolutions);
+            if (absSessionRevs > 0.25f) {  // At least 1/4 rotation to count
                 // Log session end with timestamp and rotation count
                 rtc_get_datetime(datetime, sizeof(datetime));
                 snprintf(log_msg, sizeof(log_msg), 
-                        "[%s] Session ended. Rotations: %.2f\r\n", 
-                        datetime, session_rotations);
+                        "[%s] Session ended. Total revolutions: %.2f\r\n", 
+                        datetime, absSessionRevs);
                 uart_print(log_msg);
 
                 // Save to session history
-                add_session_to_memory(datetime, session_rotations);
+                add_session_to_memory(datetime, absSessionRevs);
                 
                 // Log event to flash memory
-                log_session_event(EVENT_ROLL_CHANGE, datetime, session_rotations);
+                log_session_event(EVENT_DISPENSE, datetime, absSessionRevs);
             } else {
                 // Short debug message for ignored sessions
-                uart_print("Session ignored (< 0.25 rotations)\r\n");
+                uart_print("Session timeout (< 0.25 revolutions)\r\n");
             }
+            
+            // Reset all counters
+            sessionRevolutions = 0.0f;
+            pullRevolutions = 0.0f;
+            previousPullRevolutions = 0.0f;
+            pull_timeout_start = 0;
         }
 
-        // Check for command ready flag - this would be set in the USART2_IRQHandler
-        // Note: We don't need to check cmdReady here because our IRQ already processes commands
-        // This would be necessary if we moved complex command handling out of the interrupt
-
-        // Short delay
-        for (volatile int i = 0; i < 1000; ++i); 
+        // Short delay to prevent overwhelming the I2C bus
+        for (volatile int i = 0; i < 5000; ++i); 
     }
 }
