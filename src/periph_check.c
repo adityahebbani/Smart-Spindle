@@ -4,7 +4,7 @@
 #define ADXL345_ADDR 0x53
 #define DS3231_ADDR  0x68
 #define TSL2591_ADDR 0x29
-#define MPU6050_ADDR 0x69
+#define MPU6050_ADDR 0x68
 #define MPU6050_WHO_AM_I 0x75
 
 void delay(volatile uint32_t d) { while (d--) __NOP(); }
@@ -84,33 +84,90 @@ int i2c1_read_reg(uint8_t dev_addr, uint8_t reg, uint8_t *data) {
     return 0;
 }
 
+int i2c1_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data) {
+    const uint32_t MAX_TIMEOUT = 50000; // Same timeout as in read function
+    uint32_t timeout;
+    
+    // Generate start condition
+    I2C1->CR1 |= I2C_CR1_START;
+    
+    // Wait for start condition with timeout
+    timeout = MAX_TIMEOUT;
+    while (!(I2C1->SR1 & I2C_SR1_SB) && timeout) timeout--;
+    if (!timeout) {
+        I2C1->CR1 |= I2C_CR1_STOP; // Send stop to release the bus
+        return -1;  // Timeout error
+    }
+    
+    (void)I2C1->SR1; // Clear SB flag
+    I2C1->DR = (dev_addr << 1); // Send device address (write mode)
+    
+    // Wait for address sent with timeout
+    timeout = MAX_TIMEOUT;
+    while (!(I2C1->SR1 & I2C_SR1_ADDR) && timeout) timeout--;
+    if (!timeout) {
+        I2C1->CR1 |= I2C_CR1_STOP;
+        return -2;  // Address error
+    }
+    
+    (void)I2C1->SR2; // Clear ADDR flag
+    
+    // Send register address
+    I2C1->DR = reg;
+    
+    // Wait for TXE with timeout
+    timeout = MAX_TIMEOUT;
+    while (!(I2C1->SR1 & I2C_SR1_TXE) && timeout) timeout--;
+    if (!timeout) {
+        I2C1->CR1 |= I2C_CR1_STOP;
+        return -3;  // Register address error
+    }
+    
+    // Send data
+    I2C1->DR = data;
+    
+    // Wait for TXE with timeout
+    timeout = MAX_TIMEOUT;
+    while (!(I2C1->SR1 & I2C_SR1_TXE) && timeout) timeout--;
+    if (!timeout) {
+        I2C1->CR1 |= I2C_CR1_STOP;
+        return -4;  // Data write error
+    }
+    
+    // Generate stop condition
+    I2C1->CR1 |= I2C_CR1_STOP;
+    
+    return 0;  // Success
+}
+
 int main(void) {
     usart2_init();
     led_init();
     i2c1_init();
     delay(1600000);
-
-    // usart2_print("ADXL345 Minimal Test\r\n");
-    uint8_t devid = 0;
-    int result = i2c1_read_reg(ADXL345_ADDR, 0x00, &devid);
+    int result;
     char msg[64];
-    if (result == 0 && devid == 0xE5) {
-        usart2_print("ADXL345 detected! DEVID=0xE5\r\n");
-    } else {
-        snprintf(msg, sizeof(msg), "ERROR: result=%d, DEVID=0x%02X\r\n", result, devid);
-        usart2_print(msg);
-    }
 
-    // DS3231 check (read seconds register, should be valid BCD)
-    uint8_t seconds = 0;
-    result = i2c1_read_reg(DS3231_ADDR, 0x00, &seconds);
-    if (result == 0) {
-        snprintf(msg, sizeof(msg), "DS3231 detected! Seconds=0x%02X\r\n", seconds);
-        usart2_print(msg);
-    } else {
-        snprintf(msg, sizeof(msg), "DS3231 ERROR: result=%d\r\n", result);
-        usart2_print(msg);
-    }
+    // // usart2_print("ADXL345 Minimal Test\r\n");
+    // uint8_t devid = 0;
+    // result= i2c1_read_reg(ADXL345_ADDR, 0x00, &devid);
+    // if (result == 0 && devid == 0xE5) {
+    //     usart2_print("ADXL345 detected! DEVID=0xE5\r\n");
+    // } else {
+    //     snprintf(msg, sizeof(msg), "ERROR: result=%d, DEVID=0x%02X\r\n", result, devid);
+    //     usart2_print(msg);
+    // }
+
+    // // DS3231 check (read seconds register, should be valid BCD)
+    // uint8_t seconds = 0;
+    // result = i2c1_read_reg(DS3231_ADDR, 0x00, &seconds);
+    // if (result == 0) {
+    //     snprintf(msg, sizeof(msg), "DS3231 detected! Seconds=0x%02X\r\n", seconds);
+    //     usart2_print(msg);
+    // } else {
+    //     snprintf(msg, sizeof(msg), "DS3231 ERROR: result=%d\r\n", result);
+    //     usart2_print(msg);
+    // }
 
     // TSL2591 check (read ID register, should be 0x50 per datasheet)
     uint8_t tsl_id = 0;
@@ -132,6 +189,7 @@ int main(void) {
         // Try reading the gyroscope Z high byte as a functional check
         i2c1_write_reg(MPU6050_ADDR, 0x6B, 0x00); // 0x6B = PWR_MGMT_1, 0x00 = wake up
         delay(10000);
+        
         uint8_t gyro_z_h = 0;
         result = i2c1_read_reg(MPU6050_ADDR, 0x47, &gyro_z_h); // GYRO_ZOUT_H register
         if (result == 0) {
