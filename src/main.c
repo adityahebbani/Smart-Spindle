@@ -935,9 +935,19 @@ int main(void) {
         static uint32_t last_sample_time = 0;
         if (last_sample_time == 0) last_sample_time = current_time;
         float dt = (current_time - last_sample_time) / 1000.0f; // ms to seconds
+
+        // Optional: deadband to ignore gyro noise
+        if (fabsf(gyro.z_dps) < 1.0f) gyro.z_dps = 0.0f;
+
         pullRevolutions += (gyro.z_dps * dt) / 360.0f;
         last_sample_time = current_time;
-        
+
+        // Always update previousPullRevolutions
+        float revolution_delta = fabsf(pullRevolutions - previousPullRevolutions);
+        previousPullRevolutions = pullRevolutions;
+
+        int spindleIsMoving = (revolution_delta > PULL_REV_THRESHOLD);
+
         // Check if spindle is moving (meaningful rotation change)
         float revolution_delta = fabsf(pullRevolutions - previousPullRevolutions);
         int spindleIsMoving = (revolution_delta > PULL_REV_THRESHOLD);
@@ -1024,6 +1034,6 @@ int main(void) {
         }
 
         // Short delay to prevent overwhelming the I2C bus
-        for (volatile int i = 0; i < 5000; ++i); 
+        for (volatile int i = 0; i < 500; ++i); 
     }
 }
