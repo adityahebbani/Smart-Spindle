@@ -886,9 +886,6 @@ int main(void) {
     // Systick timer for millisecond timing
     SysTick_Config(SystemCoreClock / 1000); // 1 ms tick
 
-
-    /* Gyroscope-based rotation tracking logic (from old.js) */
-    
     // Rotation tracking variables
     float pullRevolutions = 0.0f;         // Current pull revolutions
     float previousPullRevolutions = 0.0f; // Previous pull revolutions  
@@ -908,16 +905,20 @@ int main(void) {
     // Print command help
     uart_print("Type 'help' for available commands\r\n\r\n");
 
+    static uint32_t last_sample_time = 0;
+    static uint32_t last_debug = 0;
+
     while (1) {
         mpu6050_gyro_t gyro;
         mpu6050_read_gyro_z(&gyro);
 
-        // Check for sensor error (Z = 0 might indicate communication error)
+        // Get current time for timeout detection
+        current_time = getTimeMs();
+
+        // Sensor error recovery
         if (gyro.z == 0 && gyro.z_dps == 0.0f) {
-            // Try sensor recovery (but don't flood with recovery attempts)
             static uint32_t last_recovery = 0;
-            current_time = getTimeMs();
-            if (current_time - last_recovery > 5000) { // Try recovery every 5 seconds
+            if (current_time - last_recovery > 5000) {
                 i2c_bus_recovery();
                 i2c1_init();
                 mpu6050_init();
@@ -926,114 +927,87 @@ int main(void) {
             continue;
         }
 
-        // Get current time for timeout detection
-        current_time = getTimeMs();
-
-        // Add gyroscope Z data to revolution counter (from old.js logic)
-        // pullRevolutions += data.gyro.z / PUCK_GYRO_CONSTANT;
-        // pullRevolutions += (float)gyro.z / PUCK_GYRO_CONSTANT;
-        static uint32_t last_sample_time = 0;
+        // Time delta for integration
         if (last_sample_time == 0) last_sample_time = current_time;
         float dt = (current_time - last_sample_time) / 1000.0f; // ms to seconds
-
-        // Optional: deadband to ignore gyro noise
-        if (fabsf(gyro.z_dps) < 1.0f) gyro.z_dps = 0.0f;
-
-        pullRevolutions += (gyro.z_dps * dt) / 360.0f;
         last_sample_time = current_time;
 
-        // Always update previousPullRevolutions
-        float revolution_delta = fabsf(pullRevolutions - previousPullRevolutions);
-        previousPullRevolutions = pullRevolutions;
+        // Deadband to ignore gyro noise
+        if (fabsf(gyro.z_dps) < 1.0f) gyro.z_dps = 0.0f;
 
-        int spindleIsMoving = (revolution_delta > PULL_REV_THRESHOLD);
+        // Integrate gyro Z to get revolutions
+        float delta_revs = (gyro.z_dps * dt) / 360.0f;
+        pullRevolutions += delta_revs;
 
-        // Check if spindle is moving (meaningful rotation change)
-        float revolution_delta = fabsf(pullRevolutions - previousPullRevolutions);
-        int spindleIsMoving = (revolution_delta > PULL_REV_THRESHOLD);
-        
+        // Print each movement (delta in revolutions)
+        if (fabsf(delta_revs) > 0.0001f) { // Only print if there was movement
+            snprintf(log_msg, sizeof(log_msg),
+                "Gyro Z: %d (%.2f dps), Delta revs: %.5f, Pull revs: %.3f, Session revs: %.3f\r\n",
+                gyro.z, gyro.z_dps, delta_revs, pullRevolutions, sessionRevolutions);
+            uart_print(log_msg);
+        }
+
+        // Detect movement
+        int spindleIsMoving = (fabsf(delta_revs) > PULL_REV_THRESHOLD);
+
+        // Session logic
         if (spindleIsMoving) {
-            // Movement detected - manage session and pull timeouts
             if (!session_active) {
                 session_active = 1;
                 sessionRevolutions = 0.0f;
-                
-                // Log session start with timestamp
                 rtc_get_datetime(datetime, sizeof(datetime));
                 snprintf(log_msg, sizeof(log_msg), "[%s] Session started\r\n", datetime);
                 uart_print(log_msg);
             }
-            
-            // Update motion time and pull timeout
             last_motion_time = current_time;
             pull_timeout_start = current_time;
-            previousPullRevolutions = pullRevolutions;
-            
-            // Debug output (every 500ms during motion)
-            static uint32_t last_debug = 0;
-            if (current_time - last_debug > 500) {
-                snprintf(log_msg, sizeof(log_msg), 
-                        "Gyro Z: %d (%.2f dps), Pull revs: %.3f, Session revs: %.3f\r\n", 
-                        gyro.z, gyro.z_dps, pullRevolutions, sessionRevolutions);
-                uart_print(log_msg);
-                last_debug = current_time;
-            }
         }
-        
+
         // Pull timeout handling (like onPullEnd in old.js)
-        if (session_active && pull_timeout_start > 0 && 
+        if (session_active && pull_timeout_start > 0 &&
             (current_time - pull_timeout_start > PULL_TIMEOUT_MS)) {
-            
+
             // Round revolutions to nearest quarter
             float roundedRevolutions = roundf(pullRevolutions * 4.0f) / 4.0f;
-            
-            if (fabsf(roundedRevolutions) > 0.25f) {  // Ignore very small movements
-                snprintf(log_msg, sizeof(log_msg), 
+
+            if (fabsf(roundedRevolutions) > 0.25f) {
+                snprintf(log_msg, sizeof(log_msg),
                         "Pull end: %.2f revolutions\r\n", roundedRevolutions);
                 uart_print(log_msg);
-                
-                // Add to session total (allowing negative for rewinding)
+
                 sessionRevolutions += roundedRevolutions;
             }
-            
+
             // Reset pull tracking
             pullRevolutions = 0.0f;
-            previousPullRevolutions = 0.0f;
             pull_timeout_start = 0;
         }
 
         // Session timeout handling (like onSessionEnd in old.js)
         if (session_active && (current_time - last_motion_time > SESSION_TIMEOUT_MS)) {
             session_active = 0;
-            
-            // Only log sessions with meaningful rotation
+
             float absSessionRevs = fabsf(sessionRevolutions);
-            if (absSessionRevs > 0.25f) {  // At least 1/4 rotation to count
-                // Log session end with timestamp and rotation count
+            if (absSessionRevs > 0.25f) {
                 rtc_get_datetime(datetime, sizeof(datetime));
-                snprintf(log_msg, sizeof(log_msg), 
-                        "[%s] Session ended. Total revolutions: %.2f\r\n", 
+                snprintf(log_msg, sizeof(log_msg),
+                        "[%s] Session ended. Total revolutions: %.2f\r\n",
                         datetime, absSessionRevs);
                 uart_print(log_msg);
 
-                // Save to session history
                 add_session_to_memory(datetime, absSessionRevs);
-                
-                // Log event to flash memory
                 log_session_event(EVENT_DISPENSE, datetime, absSessionRevs);
             } else {
-                // Short debug message for ignored sessions
                 uart_print("Session timeout (< 0.25 revolutions)\r\n");
             }
-            
+
             // Reset all counters
             sessionRevolutions = 0.0f;
             pullRevolutions = 0.0f;
-            previousPullRevolutions = 0.0f;
             pull_timeout_start = 0;
         }
 
         // Short delay to prevent overwhelming the I2C bus
-        for (volatile int i = 0; i < 500; ++i); 
+        for (volatile int i = 0; i < 500; ++i);
     }
 }
