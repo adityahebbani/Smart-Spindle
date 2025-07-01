@@ -32,6 +32,9 @@ float get_total_rotations(void);
 void print_session_history(void);
 int i2c1_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data);
 int i2c1_read_bytes(uint8_t dev_addr, uint8_t reg, uint8_t *buf, uint8_t len);
+int i2c2_read_reg(uint8_t dev_addr, uint8_t reg, uint8_t *data);
+int i2c2_read_bytes(uint8_t dev_addr, uint8_t reg, uint8_t *buf, uint8_t len);
+int i2c2_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data);
 
 /* Logger */
 typedef enum { LOG_OFF, LOG_ERROR, LOG_INFO, LOG_DEBUG, LOG_SILLY } LogLevel;
