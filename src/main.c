@@ -109,7 +109,7 @@ int set_ds3231_time(uint16_t year, uint8_t month, uint8_t day, uint8_t weekday,
 
     // Write all 7 bytes starting at register 0x00
     for (int i = 0; i < 7; ++i) {
-        if (i2c1_write_reg(DS3231_ADDR, 0x00 + i, data[i]) != 0)
+        if (i2c2_write_reg(DS3231_ADDR, 0x00 + i, data[i]) != 0)
             return -1; // Error
     }
     return 0; // Success
@@ -118,7 +118,7 @@ int set_ds3231_time(uint16_t year, uint8_t month, uint8_t day, uint8_t weekday,
 // RTC read
 void rtc_get_datetime(char *buf, size_t len) {
     uint8_t data[7] = {0};
-    if (i2c1_read_bytes(DS3231_ADDR, 0x00, data, 7) == 0) {
+    if (i2c2_read_bytes(DS3231_ADDR, 0x00, data, 7) == 0) {
         uint8_t sec  = bcd2bin(data[0]);
         uint8_t min  = bcd2bin(data[1]);
         uint8_t hour = bcd2bin(data[2] & 0x3F); // 24h mode
@@ -622,6 +622,89 @@ int i2c2_read_reg(uint8_t dev_addr, uint8_t reg, uint8_t *data) {
     *data = I2C2->DR;
     I2C2->CR1 |= I2C_CR1_STOP;
     I2C2->CR1 |= I2C_CR1_ACK;
+    return 0;
+}
+
+int i2c2_read_bytes(uint8_t dev_addr, uint8_t reg, uint8_t *buf, uint8_t len) {
+    const uint32_t MAX_TIMEOUT = 50000;
+    uint32_t timeout;
+
+    // Write register address
+    I2C2->CR1 |= I2C_CR1_START;
+    timeout = MAX_TIMEOUT;
+    while (!(I2C2->SR1 & I2C_SR1_SB) && timeout) timeout--;
+    if (!timeout) {
+        I2C2->CR1 |= I2C_CR1_STOP;
+        return -1;
+    }
+
+    (void)I2C2->SR1;
+    I2C2->DR = (dev_addr << 1);
+
+    timeout = MAX_TIMEOUT;
+    while (!(I2C2->SR1 & I2C_SR1_ADDR) && timeout) timeout--;
+    if (!timeout) {
+        I2C2->CR1 |= I2C_CR1_STOP;
+        return -2;
+    }
+
+    (void)I2C2->SR2;
+    I2C2->DR = reg;
+
+    timeout = MAX_TIMEOUT;
+    while (!(I2C2->SR1 & I2C_SR1_TXE) && timeout) timeout--;
+    if (!timeout) {
+        I2C2->CR1 |= I2C_CR1_STOP;
+        return -3;
+    }
+
+    // Restart for read
+    I2C2->CR1 |= I2C_CR1_START;
+    timeout = MAX_TIMEOUT;
+    while (!(I2C2->SR1 & I2C_SR1_SB) && timeout) timeout--;
+    if (!timeout) {
+        I2C2->CR1 |= I2C_CR1_STOP;
+        return -4;
+    }
+
+    (void)I2C2->SR1;
+    I2C2->DR = (dev_addr << 1) | 1;
+
+    timeout = MAX_TIMEOUT;
+    while (!(I2C2->SR1 & I2C_SR1_ADDR) && timeout) timeout--;
+    if (!timeout) {
+        I2C2->CR1 |= I2C_CR1_STOP;
+        return -5;
+    }
+
+    (void)I2C2->SR2;
+
+    // For single byte read, disable ACK before clearing ADDR
+    if (len == 1) {
+        I2C2->CR1 &= ~I2C_CR1_ACK;
+    } else {
+        I2C2->CR1 |= I2C_CR1_ACK;
+    }
+
+    for (uint8_t i = 0; i < len; ++i) {
+        // For last byte, send NACK
+        if (i == len - 1 && len > 1) {
+            I2C2->CR1 &= ~I2C_CR1_ACK;
+        }
+
+        timeout = MAX_TIMEOUT;
+        while (!(I2C2->SR1 & I2C_SR1_RXNE) && timeout) timeout--;
+        if (!timeout) {
+            I2C2->CR1 |= I2C_CR1_STOP;
+            return -6;
+        }
+
+        buf[i] = I2C2->DR;
+    }
+
+    I2C2->CR1 |= I2C_CR1_STOP;
+    I2C2->CR1 |= I2C_CR1_ACK; // Re-enable ACK for future transfers
+
     return 0;
 }
 
