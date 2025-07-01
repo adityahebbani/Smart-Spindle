@@ -125,8 +125,20 @@ int main(void) {
     // MPU6050 check (WHO_AM_I register)
     uint8_t mpu_id = 0;
     result = i2c1_read_reg(MPU6050_ADDR, MPU6050_WHO_AM_I, &mpu_id);
-    if (result == 0 && mpu_id == 0x69) {
-        usart2_print("MPU6050 detected! WHO_AM_I=0x69\r\n");
+    if (result == 0 && (mpu_id == 0x68 || mpu_id == 0x69)) {
+        snprintf(msg, sizeof(msg), "MPU6050 detected! WHO_AM_I=0x%02X\r\n", mpu_id);
+        usart2_print(msg);
+
+        // Try reading the gyroscope Z high byte as a functional check
+        uint8_t gyro_z_h = 0;
+        result = i2c1_read_reg(MPU6050_ADDR, 0x47, &gyro_z_h); // GYRO_ZOUT_H register
+        if (result == 0) {
+            snprintf(msg, sizeof(msg), "MPU6050 GYRO_ZOUT_H=0x%02X\r\n", gyro_z_h);
+            usart2_print(msg);
+        } else {
+            snprintf(msg, sizeof(msg), "MPU6050 GYRO_ZOUT_H read error: result=%d\r\n", result);
+            usart2_print(msg);
+        }
     } else {
         snprintf(msg, sizeof(msg), "MPU6050 ERROR: result=%d, WHO_AM_I=0x%02X\r\n", result, mpu_id);
         usart2_print(msg);
