@@ -130,6 +130,8 @@ int main(void) {
         usart2_print(msg);
 
         // Try reading the gyroscope Z high byte as a functional check
+        i2c1_write_reg(MPU6050_ADDR, 0x6B, 0x00); // 0x6B = PWR_MGMT_1, 0x00 = wake up
+        delay(10000);
         uint8_t gyro_z_h = 0;
         result = i2c1_read_reg(MPU6050_ADDR, 0x47, &gyro_z_h); // GYRO_ZOUT_H register
         if (result == 0) {
