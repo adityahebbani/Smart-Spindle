@@ -54,6 +54,31 @@ void i2c1_init(void) {
     I2C1->CR1 |= I2C_CR1_PE;
 }
 
+void i2c2_init(void) {
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
+    RCC->APB1ENR |= RCC_APB1ENR_I2C2EN;
+    // Set PB10 (D6) to AF4 (I2C2_SCL)
+    GPIOB->MODER &= ~(0x3 << (10*2));
+    GPIOB->MODER |=  (0x2 << (10*2));
+    GPIOB->AFR[1] &= ~(0xF << ((10-8)*4));
+    GPIOB->AFR[1] |=  (0x4 << ((10-8)*4));
+    // Set PB3 (D3) to AF9 (I2C2_SDA)
+    GPIOB->MODER &= ~(0x3 << (3*2));
+    GPIOB->MODER |=  (0x2 << (3*2));
+    GPIOB->AFR[0] &= ~(0xF << (3*4));
+    GPIOB->AFR[0] |=  (0x9 << (3*4));
+    // Open-drain and pull-up
+    GPIOB->OTYPER |= (1 << 10) | (1 << 3);
+    GPIOB->PUPDR &= ~((0x3 << (10*2)) | (0x3 << (3*2)));
+    GPIOB->PUPDR |=  (0x1 << (10*2)) | (0x1 << (3*2));
+    GPIOB->ODR |= (1 << 10) | (1 << 3);
+    // I2C2 peripheral setup
+    I2C2->CR2 = 16;
+    I2C2->CCR = 80;
+    I2C2->TRISE = 17;
+    I2C2->CR1 |= I2C_CR1_PE;
+}
+
 int i2c1_read_reg(uint8_t dev_addr, uint8_t reg, uint8_t *data) {
     uint32_t timeout;
     I2C1->CR1 |= I2C_CR1_START;
@@ -81,6 +106,36 @@ int i2c1_read_reg(uint8_t dev_addr, uint8_t reg, uint8_t *data) {
     *data = I2C1->DR;
     I2C1->CR1 |= I2C_CR1_STOP;
     I2C1->CR1 |= I2C_CR1_ACK;
+    return 0;
+}
+
+int i2c2_read_reg(uint8_t dev_addr, uint8_t reg, uint8_t *data) {
+    uint32_t timeout;
+    I2C2->CR1 |= I2C_CR1_START;
+    timeout = 10000; while (!(I2C2->SR1 & I2C_SR1_SB) && --timeout);
+    if (!timeout) return -1;
+    (void)I2C2->SR1;
+    I2C2->DR = (dev_addr << 1);
+    timeout = 10000; while (!(I2C2->SR1 & I2C_SR1_ADDR) && --timeout);
+    if (!timeout) return -2;
+    (void)I2C2->SR2;
+    I2C2->DR = reg;
+    timeout = 10000; while (!(I2C2->SR1 & I2C_SR1_TXE) && --timeout);
+    if (!timeout) return -3;
+    I2C2->CR1 |= I2C_CR1_START;
+    timeout = 10000; while (!(I2C2->SR1 & I2C_SR1_SB) && --timeout);
+    if (!timeout) return -4;
+    (void)I2C2->SR1;
+    I2C2->DR = (dev_addr << 1) | 1;
+    timeout = 10000; while (!(I2C2->SR1 & I2C_SR1_ADDR) && --timeout);
+    if (!timeout) return -5;
+    (void)I2C2->SR2;
+    I2C2->CR1 &= ~I2C_CR1_ACK;
+    timeout = 10000; while (!(I2C2->SR1 & I2C_SR1_RXNE) && --timeout);
+    if (!timeout) return -6;
+    *data = I2C2->DR;
+    I2C2->CR1 |= I2C_CR1_STOP;
+    I2C2->CR1 |= I2C_CR1_ACK;
     return 0;
 }
 
@@ -140,10 +195,31 @@ int i2c1_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data) {
     return 0;  // Success
 }
 
+int i2c2_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data) {
+    uint32_t timeout;
+    I2C2->CR1 |= I2C_CR1_START;
+    timeout = 10000; while (!(I2C2->SR1 & I2C_SR1_SB) && --timeout);
+    if (!timeout) return -1;
+    (void)I2C2->SR1;
+    I2C2->DR = (dev_addr << 1);
+    timeout = 10000; while (!(I2C2->SR1 & I2C_SR1_ADDR) && --timeout);
+    if (!timeout) return -2;
+    (void)I2C2->SR2;
+    I2C2->DR = reg;
+    timeout = 10000; while (!(I2C2->SR1 & I2C_SR1_TXE) && --timeout);
+    if (!timeout) return -3;
+    I2C2->DR = data;
+    timeout = 10000; while (!(I2C2->SR1 & I2C_SR1_TXE) && --timeout);
+    if (!timeout) return -4;
+    I2C2->CR1 |= I2C_CR1_STOP;
+    return 0;
+}
+
 int main(void) {
     usart2_init();
     led_init();
     i2c1_init();
+    i2c2_init();
     delay(1600000);
     int result;
     char msg[64];
@@ -158,16 +234,16 @@ int main(void) {
     //     usart2_print(msg);
     // }
 
-    // // DS3231 check (read seconds register, should be valid BCD)
-    // uint8_t seconds = 0;
-    // result = i2c1_read_reg(DS3231_ADDR, 0x00, &seconds);
-    // if (result == 0) {
-    //     snprintf(msg, sizeof(msg), "DS3231 detected! Seconds=0x%02X\r\n", seconds);
-    //     usart2_print(msg);
-    // } else {
-    //     snprintf(msg, sizeof(msg), "DS3231 ERROR: result=%d\r\n", result);
-    //     usart2_print(msg);
-    // }
+    // DS3231 check (read seconds register, should be valid BCD)
+    uint8_t seconds = 0;
+    result = i2c2_read_reg(DS3231_ADDR, 0x00, &seconds);
+    if (result == 0) {
+        snprintf(msg, sizeof(msg), "DS3231 detected! Seconds=0x%02X\r\n", seconds);
+        usart2_print(msg);
+    } else {
+        snprintf(msg, sizeof(msg), "DS3231 ERROR: result=%d\r\n", result);
+        usart2_print(msg);
+    }
 
     // TSL2591 check (read ID register, should be 0x50 per datasheet)
     uint8_t tsl_id = 0;
@@ -182,7 +258,7 @@ int main(void) {
     // MPU6050 check (WHO_AM_I register)
     uint8_t mpu_id = 0;
     result = i2c1_read_reg(MPU6050_ADDR, MPU6050_WHO_AM_I, &mpu_id);
-    if (result == 0 && (mpu_id == 0x68 || mpu_id == 0x69)) {
+    if (result == 0 && (mpu_id == 0x68)) {
         snprintf(msg, sizeof(msg), "MPU6050 detected! WHO_AM_I=0x%02X\r\n", mpu_id);
         usart2_print(msg);
 
