@@ -928,7 +928,12 @@ int main(void) {
 
         // Add gyroscope Z data to revolution counter (from old.js logic)
         // pullRevolutions += data.gyro.z / PUCK_GYRO_CONSTANT;
-        pullRevolutions += (float)gyro.z / PUCK_GYRO_CONSTANT;
+        // pullRevolutions += (float)gyro.z / PUCK_GYRO_CONSTANT;
+        static uint32_t last_sample_time = 0;
+        if (last_sample_time == 0) last_sample_time = current_time;
+        float dt = (current_time - last_sample_time) / 1000.0f; // ms to seconds
+        pullRevolutions += (gyro.z_dps * dt) / 360.0f;
+        last_sample_time = current_time;
         
         // Check if spindle is moving (meaningful rotation change)
         float revolution_delta = fabsf(pullRevolutions - previousPullRevolutions);
