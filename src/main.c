@@ -1023,11 +1023,11 @@ int main(void) {
         }
 
         // Print debug information
-        char dbg[64];
-        snprintf(dbg, sizeof(dbg), "dt=%.3f, gyro.z_dps=%.2f, delta_revs=%.3f, pullRevs=%.3f\n", dt, gyro.z_dps, delta_revs, pullRevolutions);
-        uart_print(dbg);
+        // char dbg[64];
+        // snprintf(dbg, sizeof(dbg), "dt=%.3f, gyro.z_dps=%.2f, delta_revs=%.3f, pullRevs=%.3f\n", dt, gyro.z_dps, delta_revs, pullRevolutions);
+        // uart_print(dbg);
 
         // Short delay to prevent overwhelming the I2C bus
-        for (volatile int i = 0; i < 500; ++i);
+        // for (volatile int i = 0; i < 500; ++i);
     }
 }
