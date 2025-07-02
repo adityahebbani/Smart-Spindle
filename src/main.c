@@ -21,11 +21,20 @@
 #define MPU6050_ACCEL_CONFIG 0x1C
 #define MPU6050_GYRO_XOUT_H  0x43
 
+// Increase motion interrupt sensitivity threshold (higher = less sensitive)
+#define MPU_WAKE_THRESHOLD 50  // LSB threshold for motion interrupt (default 20)
+// Minimum gyro rate (°/s) to consider a valid wake event
+#define WAKE_DPS_THRESHOLD 5.0f
+
 // Constants from original Espruino code
 #define PUCK_GYRO_CONSTANT 600000.0f  // Magic constant for gyro to revolutions conversion
 #define SIGNIFICANT_GYRO_THRESHOLD 0.1f       // Minimum revolution change to register movement
 #define PULL_TIMEOUT_MS 1000          // Timeout for pull end detection
 #define SESSION_TIMEOUT_MS 10000     // 10 seconds session timeout (like original)
+// Wake sensitivity: motion interrupt threshold (LSB units) - increase for less sensitivity
+#define MPU_WAKE_THRESHOLD 60        // default was 20
+// Minimum gyro rate (°/s) to wake from sleep
+#define WAKE_DPS_THRESHOLD 5.0f       // Adjust: higher = less sensitive wake
 
 
 /* Function Declarations */
@@ -852,20 +861,19 @@ volatile int session_active = 0;
 void EXTI15_10_IRQHandler(void) {
     if (EXTI->PR & EXTI_PR_PR10) {
         EXTI->PR = EXTI_PR_PR10; // Clear pending bit
-        // Handle gyroscope event (read data, log, etc.)
-        logger(LOG_INFO, "Gyroscope interrupt!");
+        // Read gyro and only wake on strong motion
         mpu6050_gyro_t gyro;
         mpu6050_read_gyro_z(&gyro);
-        char msg[64];
-        snprintf(msg, sizeof(msg), "MPU6050 Gyro Z: %d (%.2f dps)", gyro.z, gyro.z_dps);
-        logger(LOG_INFO, msg);
-        wakeup_requested = 1;
-        // Clear sensor interrupt latch by reading INT_STATUS
-        uint8_t dummy;
-        i2c1_read_bytes(MPU6050_ADDR, 0x3A, &dummy, 1);
-        // Start session on wake
-        session_active = 1;
-        // Do NOT set session_active here; let main loop handle it on real movement
+        if (fabsf(gyro.z_dps) >= WAKE_DPS_THRESHOLD) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "Wake interrupt: %.2f dps", gyro.z_dps);
+            logger(LOG_INFO, msg);
+            wakeup_requested = 1;
+            // Clear sensor interrupt latch by reading INT_STATUS
+            uint8_t dummy;
+            i2c1_read_bytes(MPU6050_ADDR, 0x3A, &dummy, 1);
+        }
+        // Do NOT set session_active here; let main loop handle it
     }
 }
 
@@ -883,8 +891,8 @@ uint8_t mpu6050_read_devid(void) {
 
 void mpu6050_enable_motion_interrupt(void) {
     // Set motion threshold (MOT_THR, register 0x1F)
-    // Value is in LSB, adjust as needed (e.g., 20 = ~1.25mg)
-    i2c1_write_reg(MPU6050_ADDR, 0x1F, 20);
+    // Value is in LSB, adjust as needed; higher = stronger motion required
+    i2c1_write_reg(MPU6050_ADDR, 0x1F, MPU_WAKE_THRESHOLD);
 
     // Set motion duration (MOT_DUR, register 0x20)
     // Value is in ms, 1 = 1ms (minimum duration above threshold)
@@ -1059,8 +1067,6 @@ int main(void) {
 
         // Get current time for timeout detection
         current_time = getTimeMs();
-
-        // ...existing code...
 
         // Sensor error recovery
         if (gyro.z == 0 && gyro.z_dps == 0.0f) {
