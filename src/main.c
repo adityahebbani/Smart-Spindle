@@ -888,7 +888,7 @@ int main(void) {
 
     // Rotation tracking variables
     float pullRevolutions = 0.0f;         // Current pull revolutions
-    float previousPullRevolutions = 0.0f; // Previous pull revolutions  
+    // float previousPullRevolutions = 0.0f; // Previous pull revolutions  
     float sessionRevolutions = 0.0f;      // Total session revolutions
     int session_active = 0;               // Session state
     uint32_t last_motion_time = 0;        // Last motion timestamp
@@ -906,7 +906,7 @@ int main(void) {
     uart_print("Type 'help' for available commands\r\n\r\n");
 
     static uint32_t last_sample_time = 0;
-    static uint32_t last_debug = 0;
+    // static uint32_t last_debug = 0;
 
     while (1) {
         mpu6050_gyro_t gyro;

@@ -71,3 +71,10 @@ Program
 0x08000370 in i2c1_read_bytes (dev_addr=dev_addr@entry=83 'S', reg=reg@entry=0 '\000', buf=buf@entry=0x20017f6f "", len=len@entry=1 '\001') at src\main.c:162
 162	    while (!(I2C1->SR1 & I2C_SR1_SB));
 When running the debugger, the program seems to hang on this line in i2c1_read_bytes function. Can you explain what is going on here? 
+
+Linking .pio\build\genericSTM32F401RE\firmware.elf
+c:/users/u36604/.platformio/packages/toolchain-gccarmnoneeabi/bin/../lib/gcc/arm-none-eabi/7.2.1/../../../../arm-none-eabi/bin/ld.exe: cannot find -lC:\Users\U36604\Projects\Smart Spindle\_printf_float
+collect2.exe: error: ld returned 1 exit status
+*** [.pio\build\genericSTM32F401RE\firmware.elf] Error 1
+===============================================================
+
