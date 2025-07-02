@@ -59,6 +59,28 @@ typedef struct {
 Event eventArray[MAX_EVENTS];
 int eventCount = 0;
 
+/* Convert floats to strings */
+void print_float(float val, int decimals) {
+    // Convert float to string manually
+    char buf[32];
+    // Round based on number of decimals
+    float scale = 1.0f;
+    for (int i = 0; i < decimals; i++) scale *= 10.0f;
+    int isNegative = (val < 0);
+    if (isNegative) val = -val;
+
+    int wholePart = (int)val;
+    int fracPart = (int)((val - wholePart) * scale + 0.5f); // Round
+    if (isNegative) {
+        snprintf(buf, sizeof(buf), "-%d.%0*d", wholePart, decimals, fracPart);
+    } else {
+        snprintf(buf, sizeof(buf), "%d.%0*d", wholePart, decimals, fracPart);
+    }
+
+    // Print via UART/etc.
+    uart_print(buf);
+}
+
 /* Internal clock set to 84 MHz */
 void internal_clock(void)
 {
@@ -941,10 +963,17 @@ int main(void) {
 
         // Print each movement (delta in revolutions)
         if (fabsf(delta_revs) > 0.0001f) { // Only print if there was movement
-            snprintf(log_msg, sizeof(log_msg),
-                "Gyro Z: %d (%.2f dps), Delta revs: %.5f, Pull revs: %.3f, Session revs: %.3f\r\n",
-                gyro.z, gyro.z_dps, delta_revs, pullRevolutions, sessionRevolutions);
+            char log_msg[128];
+            snprintf(log_msg, sizeof(log_msg), "Gyro Z: %d (", gyro.z);
             uart_print(log_msg);
+            print_float(gyro.z_dps, 2);
+            uart_print(" dps), Delta revs: ");
+            print_float(delta_revs, 5);
+            uart_print(", Pull revs: ");
+            print_float(pullRevolutions, 3);
+            uart_print(", Session revs: ");
+            print_float(sessionRevolutions, 3);
+            uart_print("\r\n");
         }
 
         // Detect movement
@@ -963,7 +992,7 @@ int main(void) {
             pull_timeout_start = current_time;
         }
 
-        // Pull timeout handling (like onPullEnd in old.js)
+        // Pull timeout handling
         if (session_active && pull_timeout_start > 0 &&
             (current_time - pull_timeout_start > PULL_TIMEOUT_MS)) {
 
@@ -971,9 +1000,9 @@ int main(void) {
             float roundedRevolutions = roundf(pullRevolutions * 4.0f) / 4.0f;
 
             if (fabsf(roundedRevolutions) > 0.25f) {
-                snprintf(log_msg, sizeof(log_msg),
-                        "Pull end: %.2f revolutions\r\n", roundedRevolutions);
-                uart_print(log_msg);
+                uart_print("Pull end: ");
+                print_float(roundedRevolutions, 2);
+                uart_print(" revolutions\r\n");
 
                 sessionRevolutions += roundedRevolutions;
             }
@@ -983,17 +1012,18 @@ int main(void) {
             pull_timeout_start = 0;
         }
 
-        // Session timeout handling (like onSessionEnd in old.js)
+        // Session timeout handling
         if (session_active && (current_time - last_motion_time > SESSION_TIMEOUT_MS)) {
             session_active = 0;
 
             float absSessionRevs = fabsf(sessionRevolutions);
             if (absSessionRevs > 0.25f) {
                 rtc_get_datetime(datetime, sizeof(datetime));
-                snprintf(log_msg, sizeof(log_msg),
-                        "[%s] Session ended. Total revolutions: %.2f\r\n",
-                        datetime, absSessionRevs);
-                uart_print(log_msg);
+                uart_print("[");
+                uart_print(datetime);
+                uart_print("] Session ended. Total revolutions: ");
+                print_float(absSessionRevs, 2);
+                uart_print("\r\n");
 
                 add_session_to_memory(datetime, absSessionRevs);
                 log_session_event(EVENT_DISPENSE, datetime, absSessionRevs);
