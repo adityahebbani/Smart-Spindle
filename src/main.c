@@ -1047,14 +1047,29 @@ int main(void) {
         // Get current time for timeout detection
         current_time = getTimeMs();
 
+        // --- Improved sleep/wake logic ---
+        static int just_woke_up = 0;
         if (!session_active) {
-            if (!wakeup_requested) {
+            if (!wakeup_requested && !just_woke_up) {
                 uart_print("Going to sleep...\r\n");
                 __WFI(); // Sleep until motion interrupt
                 uart_print("Woke up!\r\n");
+                just_woke_up = 1;
+                wakeup_requested = 0;
+                continue; // Skip rest of loop, let sensors settle
+            }
+            if (just_woke_up) {
+                // Wait for significant movement before sleeping again
+                if (fabsf(gyro.z_dps) > 1.0f) {
+                    just_woke_up = 0;
+                } else {
+                    // Give sensors time to settle, don't re-sleep immediately
+                    continue;
+                }
             }
             wakeup_requested = 0;
-            // After waking, session_active will be set by EXTI handler
+        } else {
+            just_woke_up = 0;
         }
 
         // Sensor error recovery
