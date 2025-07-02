@@ -22,9 +22,10 @@
 
 // Constants from original Espruino code
 #define PUCK_GYRO_CONSTANT 600000.0f  // Magic constant for gyro to revolutions conversion
-#define PULL_REV_THRESHOLD 0.1f       // Minimum revolution change to register movement
+#define SIGNIFICANT_GYRO_THRESHOLD 0.1f       // Minimum revolution change to register movement
 #define PULL_TIMEOUT_MS 1000          // Timeout for pull end detection
-#define SESSION_TIMEOUT_MS 120000     // 2 minutes session timeout (like original)
+#define SESSION_TIMEOUT_MS 10000     // 10 seconds session timeout (like original)
+
 
 /* Function Declarations */
 void process_command(const char* cmd);
@@ -909,13 +910,15 @@ int main(void) {
     SysTick_Config(SystemCoreClock / 1000); // 1 ms tick
 
     // Rotation tracking variables
+    static uint32_t last_sample_time = 0;
+    int session_active = 0;
+    uint32_t last_significant_motion = 0;
+    uint32_t pull_timeout_start = 0;
     float pullRevolutions = 0.0f;         // Current pull revolutions
-    // float previousPullRevolutions = 0.0f; // Previous pull revolutions  
+    float previousPullRevolutions = 0.0f;
     float sessionRevolutions = 0.0f;      // Total session revolutions
-    int session_active = 0;               // Session state
     uint32_t last_motion_time = 0;        // Last motion timestamp
     uint32_t current_time = 0;            // Current time
-    uint32_t pull_timeout_start = 0;      // Pull timeout tracking
 
     // Print startup message
     char log_msg[128];
@@ -926,9 +929,6 @@ int main(void) {
 
     // Print command help
     uart_print("Type 'help' for available commands\r\n\r\n");
-
-    static uint32_t last_sample_time = 0;
-    // static uint32_t last_debug = 0;
 
     while (1) {
         mpu6050_gyro_t gyro;
@@ -961,61 +961,47 @@ int main(void) {
         float delta_revs = (gyro.z_dps * dt) / 360.0f;
         pullRevolutions += delta_revs;
 
-        // Print each movement (delta in revolutions)
-        if (fabsf(delta_revs) > 0.0001f) { // Only print if there was movement
-            char log_msg[128];
-            snprintf(log_msg, sizeof(log_msg), "Gyro Z: %d (", gyro.z);
-            uart_print(log_msg);
-            print_float(gyro.z_dps, 2);
-            uart_print(" dps), Delta revs: ");
-            print_float(delta_revs, 5);
-            uart_print(", Pull revs: ");
-            print_float(pullRevolutions, 3);
-            uart_print(", Session revs: ");
-            print_float(sessionRevolutions, 3);
-            uart_print("\r\n");
-        }
+        // Detect significant movement
+        int significant_movement = fabsf(pullRevolutions - previousPullRevolutions) > SIGNIFICANT_GYRO_THRESHOLD;
 
-        // Detect movement
-        int spindleIsMoving = (fabsf(delta_revs) > PULL_REV_THRESHOLD);
+        if (significant_movement) {
+            previousPullRevolutions = pullRevolutions;
+            last_significant_motion = current_time;
 
-        // Session logic
-        if (spindleIsMoving) {
+            // Start session if not already active
             if (!session_active) {
                 session_active = 1;
                 sessionRevolutions = 0.0f;
+                pullRevolutions = 0.0f;
+                previousPullRevolutions = 0.0f;
                 rtc_get_datetime(datetime, sizeof(datetime));
                 snprintf(log_msg, sizeof(log_msg), "[%s] Session started\r\n", datetime);
                 uart_print(log_msg);
             }
-            last_motion_time = current_time;
+
+            // Reset pull timeout
             pull_timeout_start = current_time;
         }
 
-        // Pull timeout handling
+         // Handle pull timeout (1s after last significant movement)
         if (session_active && pull_timeout_start > 0 &&
             (current_time - pull_timeout_start > PULL_TIMEOUT_MS)) {
 
-            // Round revolutions to nearest quarter
             float roundedRevolutions = roundf(pullRevolutions * 4.0f) / 4.0f;
-
             if (fabsf(roundedRevolutions) > 0.25f) {
                 uart_print("Pull end: ");
                 print_float(roundedRevolutions, 2);
                 uart_print(" revolutions\r\n");
-
                 sessionRevolutions += roundedRevolutions;
             }
-
-            // Reset pull tracking
             pullRevolutions = 0.0f;
+            previousPullRevolutions = 0.0f;
             pull_timeout_start = 0;
         }
 
-        // Session timeout handling
-        if (session_active && (current_time - last_motion_time > SESSION_TIMEOUT_MS)) {
+        // Handle session timeout (10s after last significant movement)
+        if (session_active && (current_time - last_significant_motion > SESSION_TIMEOUT_MS)) {
             session_active = 0;
-
             float absSessionRevs = fabsf(sessionRevolutions);
             if (absSessionRevs > 0.25f) {
                 rtc_get_datetime(datetime, sizeof(datetime));
@@ -1030,10 +1016,9 @@ int main(void) {
             } else {
                 uart_print("Session timeout (< 0.25 revolutions)\r\n");
             }
-
-            // Reset all counters
             sessionRevolutions = 0.0f;
             pullRevolutions = 0.0f;
+            previousPullRevolutions = 0.0f;
             pull_timeout_start = 0;
         }
 
