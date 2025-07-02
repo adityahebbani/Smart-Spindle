@@ -860,6 +860,11 @@ void EXTI15_10_IRQHandler(void) {
         snprintf(msg, sizeof(msg), "MPU6050 Gyro Z: %d (%.2f dps)", gyro.z, gyro.z_dps);
         logger(LOG_INFO, msg);
         wakeup_requested = 1;
+        // Clear sensor interrupt latch by reading INT_STATUS
+        uint8_t dummy;
+        i2c1_read_bytes(MPU6050_ADDR, 0x3A, &dummy, 1);
+        // Start session on wake
+        session_active = 1;
         // Do NOT set session_active here; let main loop handle it on real movement
     }
 }
@@ -1023,6 +1028,14 @@ int main(void) {
     gyro_int_init();
 
     while (1) {
+        // Sleep until interrupt if no session and no wake request
+        if (!session_active && !wakeup_requested) {
+            uart_print("Going to sleep...\r\n");
+            __WFI();
+            uart_print("Woke up!\r\n");
+            // after wake, wakeup_requested already set by EXTI
+            continue;
+        }
         // --- Light sensor roll change detection ---
         int light_now = is_light_on();
         if (light_now && !last_light_state) {
@@ -1047,30 +1060,7 @@ int main(void) {
         // Get current time for timeout detection
         current_time = getTimeMs();
 
-        // --- Improved sleep/wake logic ---
-        static int just_woke_up = 0;
-        if (!session_active) {
-            if (!wakeup_requested && !just_woke_up) {
-                uart_print("Going to sleep...\r\n");
-                __WFI(); // Sleep until motion interrupt
-                uart_print("Woke up!\r\n");
-                just_woke_up = 1;
-                wakeup_requested = 0;
-                continue; // Skip rest of loop, let sensors settle
-            }
-            if (just_woke_up) {
-                // Wait for significant movement before sleeping again
-                if (fabsf(gyro.z_dps) > 1.0f) {
-                    just_woke_up = 0;
-                } else {
-                    // Give sensors time to settle, don't re-sleep immediately
-                    continue;
-                }
-            }
-            wakeup_requested = 0;
-        } else {
-            just_woke_up = 0;
-        }
+        // ...existing code...
 
         // Sensor error recovery
         if (gyro.z == 0 && gyro.z_dps == 0.0f) {
@@ -1105,6 +1095,8 @@ int main(void) {
 
             // Start session if not already active
             if (!session_active) {
+                // clear wake request flag now that movement detected
+                wakeup_requested = 0;
                 session_active = 1;
                 sessionRevolutions = 0.0f;
                 pullRevolutions = 0.0f;
