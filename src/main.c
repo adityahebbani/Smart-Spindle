@@ -860,7 +860,7 @@ void EXTI15_10_IRQHandler(void) {
         snprintf(msg, sizeof(msg), "MPU6050 Gyro Z: %d (%.2f dps)", gyro.z, gyro.z_dps);
         logger(LOG_INFO, msg);
         wakeup_requested = 1;
-        session_active = 1;
+        // Do NOT set session_active here; let main loop handle it on real movement
     }
 }
 
