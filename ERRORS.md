@@ -78,3 +78,13 @@ collect2.exe: error: ld returned 1 exit status
 *** [.pio\build\genericSTM32F401RE\firmware.elf] Error 1
 ===============================================================
 
+Building in release mode
+Compiling .pio\build\genericSTM32F401RE\FrameworkCMSIS\gcc\startup_stm32f401xe.o
+Compiling .pio\build\genericSTM32F401RE\FrameworkCMSIS\system_stm32f4xx.o
+Compiling .pio\build\genericSTM32F401RE\src\main.o
+Compiling .pio\build\genericSTM32F401RE\src\periph_check.o
+Linking .pio\build\genericSTM32F401RE\firmware.elf
+c:/users/u36604/.platformio/packages/toolchain-gccarmnoneeabi/bin/../lib/gcc/arm-none-eabi/7.2.1/../../../../arm-none-eabi/bin/ld.exe: cannot find : Invalid argument
+c:/users/u36604/.platformio/packages/toolchain-gccarmnoneeabi/bin/../lib/gcc/arm-none-eabi/7.2.1/../../../../arm-none-eabi/bin/ld.exe: cannot find -lC:\Users\U36604\Projects\SmartSpindle\_printf_float
+collect2.exe: error: ld returned 1 exit status
+*** [.pio\build\genericSTM32F401RE\firmware.elf] Error 1
