@@ -906,10 +906,64 @@ void mpu6050_enable_motion_interrupt(void) {
 }
 
 /* Light sensor initialization */
+// --- TSL2591 Light Sensor Definitions ---
+#define TSL2591_ADDR 0x29
+#define TSL2591_COMMAND_BIT 0xA0
+#define TSL2591_REG_ENABLE 0x00
+#define TSL2591_REG_CONTROL 0x01
+#define TSL2591_REG_C0DATAL 0x14
+#define TSL2591_REG_C0DATAH 0x15
+#define TSL2591_REG_C1DATAL 0x16
+#define TSL2591_REG_C1DATAH 0x17
+#define TSL2591_ENABLE_POWERON 0x01
+#define TSL2591_ENABLE_AEN 0x02
+#define TSL2591_ENABLE_AIEN 0x10
+#define TSL2591_ENABLE_NPIEN 0x80
+#define TSL2591_INTEGRATION_100MS 0x00
+#define TSL2591_GAIN_MED 0x10
 
+// --- TSL2591 I2C helpers (on I2C1) ---
+int tsl2591_write_reg(uint8_t reg, uint8_t value) {
+    return i2c1_write_reg(TSL2591_ADDR, TSL2591_COMMAND_BIT | reg, value);
+}
+
+int tsl2591_read_bytes(uint8_t reg, uint8_t *buf, uint8_t len) {
+    return i2c1_read_bytes(TSL2591_ADDR, TSL2591_COMMAND_BIT | reg, buf, len);
+}
+
+void tsl2591_init(void) {
+    // Power on and enable ALS
+    tsl2591_write_reg(TSL2591_REG_ENABLE, TSL2591_ENABLE_POWERON | TSL2591_ENABLE_AEN);
+    // Set integration time and gain
+    tsl2591_write_reg(TSL2591_REG_CONTROL, TSL2591_INTEGRATION_100MS | TSL2591_GAIN_MED);
+}
+
+uint32_t tsl2591_read_lux(void) {
+    uint8_t buf[4];
+    if (tsl2591_read_bytes(TSL2591_REG_C0DATAL, buf, 4) != 0) {
+        return 0;
+    }
+    uint16_t ch0 = (uint16_t)(buf[1] << 8 | buf[0]);
+    uint16_t ch1 = (uint16_t)(buf[3] << 8 | buf[2]);
+    // Simple lux calculation (not calibrated, for thresholding)
+    uint32_t lux = ch0;
+    return lux;
+}
+
+// --- Light Sensing Logic (like old.js) ---
+int is_light_on(void) {
+    uint32_t lux = tsl2591_read_lux();
+    // Threshold: adjust as needed for your environment
+    return lux > 1000; // Example threshold
+}
 
 // --- Main function ---
 int main(void) {
+    // Light sensor roll change detection state
+    int last_light_state = is_light_on();
+    uint32_t last_light_event_time = getTimeMs();
+    // Initialize TSL2591 light sensor
+    tsl2591_init();
     // Enable GPIOA clock
     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
     // Set PA5 as output (LED)
@@ -969,6 +1023,24 @@ int main(void) {
     gyro_int_init();
 
     while (1) {
+        // --- Light sensor roll change detection ---
+        int light_now = is_light_on();
+        if (light_now && !last_light_state) {
+            // Rising edge: roll cover opened or roll changed
+            rtc_get_datetime(datetime, sizeof(datetime));
+            uart_print("[ROLL CHANGE DETECTED] Light ON at ");
+            uart_print(datetime);
+            uart_print("\r\n");
+            log_session_event(EVENT_ROLL_CHANGE, datetime, 0.0f);
+            // Optionally reset session counters, etc.
+            sessionRevolutions = 0.0f;
+            pullRevolutions = 0.0f;
+            previousPullRevolutions = 0.0f;
+            session_active = 0;
+            pull_timeout_start = 0;
+            last_significant_motion = current_time;
+        }
+        last_light_state = light_now;
         mpu6050_gyro_t gyro;
         mpu6050_read_gyro_z(&gyro);
 
@@ -977,7 +1049,9 @@ int main(void) {
 
         if (!session_active) {
             if (!wakeup_requested) {
+                uart_print("Going to sleep...\r\n");
                 __WFI(); // Sleep until motion interrupt
+                uart_print("Woke up!\r\n");
             }
             wakeup_requested = 0;
             // After waking, session_active will be set by EXTI handler
