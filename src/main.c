@@ -21,11 +21,6 @@
 #define MPU6050_ACCEL_CONFIG 0x1C
 #define MPU6050_GYRO_XOUT_H  0x43
 
-// Increase motion interrupt sensitivity threshold (higher = less sensitive)
-#define MPU_WAKE_THRESHOLD 50  // LSB threshold for motion interrupt (default 20)
-// Minimum gyro rate (°/s) to consider a valid wake event
-#define WAKE_DPS_THRESHOLD 5.0f
-
 // Constants from original Espruino code
 #define PUCK_GYRO_CONSTANT 600000.0f  // Magic constant for gyro to revolutions conversion
 #define SIGNIFICANT_GYRO_THRESHOLD 0.1f       // Minimum revolution change to register movement
@@ -34,7 +29,7 @@
 // Wake sensitivity: motion interrupt threshold (LSB units) - increase for less sensitivity
 #define MPU_WAKE_THRESHOLD 60        // default was 20
 // Minimum gyro rate (°/s) to wake from sleep
-#define WAKE_DPS_THRESHOLD 5.0f       // Adjust: higher = less sensitive wake
+#define WAKE_DPS_THRESHOLD 8.0f      // Adjust: higher = less sensitive wake
 
 
 /* Function Declarations */
@@ -1041,6 +1036,7 @@ int main(void) {
             uart_print("Going to sleep...\r\n");
             __WFI();
             uart_print("Woke up!\r\n");
+            for (volatile int i = 0; i < 200000; i++); // Brief delay
             // after wake, wakeup_requested already set by EXTI
             continue;
         }
