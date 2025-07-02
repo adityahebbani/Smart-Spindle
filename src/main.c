@@ -4,6 +4,7 @@
 #define _USE_MATH_DEFINES
 #include <math.h>
 #include <stdint.h>
+#include "core_cm4.h"
 
 // Define M_PI if not already defined
 #ifndef M_PI
@@ -827,35 +828,39 @@ void mpu6050_read_gyro_z(mpu6050_gyro_t *gyro) {
 
 // --- Gyroscope INT pin (e.g., PC0) as external interrupt ---
 void gyro_int_init(void) {
-    // Enable GPIOC clock
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
-    // Set PC0 as input (default)
-    GPIOC->MODER &= ~(0x3 << (0 * 2));
+    // Enable GPIOA clock
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    // Set PA10 as input (default)
+    GPIOA->MODER &= ~(0x3 << (10 * 2));
     // Enable SYSCFG clock
     RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
-    // Map EXTI0 to PC0
-    SYSCFG->EXTICR[0] &= ~SYSCFG_EXTICR1_EXTI0;
-    SYSCFG->EXTICR[0] |= (0x2 << SYSCFG_EXTICR1_EXTI0_Pos); // 0x2 = Port C
-    // Unmask EXTI0
-    EXTI->IMR |= EXTI_IMR_MR0;
+    // Map EXTI10 to PA10
+    SYSCFG->EXTICR[2] &= ~SYSCFG_EXTICR3_EXTI10;
+    SYSCFG->EXTICR[2] |= (0x0 << SYSCFG_EXTICR3_EXTI10_Pos); // 0x0 = Port A
+    // Unmask EXTI10
+    EXTI->IMR |= EXTI_IMR_MR10;
     // Rising edge trigger (or falling, depending on sensor)
-    EXTI->RTSR |= EXTI_RTSR_TR0;
-    // Enable EXTI0 interrupt in NVIC
-    NVIC_EnableIRQ(EXTI0_IRQn);
+    EXTI->RTSR |= EXTI_RTSR_TR10;
+    // Enable EXTI15_10 interrupt in NVIC
+    NVIC_EnableIRQ(EXTI15_10_IRQn);
 }
 
-// --- EXTI0 IRQ Handler (called on gyroscope interrupt) ---
-void EXTI0_IRQHandler(void) {
-    if (EXTI->PR & EXTI_PR_PR0) {
-        EXTI->PR = EXTI_PR_PR0; // Clear pending bit
+volatile int wakeup_requested = 0;
+volatile int session_active = 0;
+
+// --- EXTI15 IRQ Handler (called on gyroscope interrupt) ---
+void EXTI15_10_IRQHandler(void) {
+    if (EXTI->PR & EXTI_PR_PR10) {
+        EXTI->PR = EXTI_PR_PR10; // Clear pending bit
         // Handle gyroscope event (read data, log, etc.)
         logger(LOG_INFO, "Gyroscope interrupt!");
-        // Read and print gyro Z-axis
         mpu6050_gyro_t gyro;
         mpu6050_read_gyro_z(&gyro);
         char msg[64];
         snprintf(msg, sizeof(msg), "MPU6050 Gyro Z: %d (%.2f dps)", gyro.z, gyro.z_dps);
         logger(LOG_INFO, msg);
+        wakeup_requested = 1;
+        session_active = 1;
     }
 }
 
@@ -869,6 +874,35 @@ uint8_t mpu6050_read_devid(void) {
         i2c1_read_bytes(MPU6050_ADDR, MPU6050_WHO_AM_I, &devid, 1);
     }
     return devid;
+}
+
+void mpu6050_enable_motion_interrupt(void) {
+    // Set motion threshold (MOT_THR, register 0x1F)
+    // Value is in LSB, adjust as needed (e.g., 20 = ~1.25mg)
+    i2c1_write_reg(MPU6050_ADDR, 0x1F, 20);
+
+    // Set motion duration (MOT_DUR, register 0x20)
+    // Value is in ms, 1 = 1ms (minimum duration above threshold)
+    i2c1_write_reg(MPU6050_ADDR, 0x20, 40); // 40ms
+
+    // Enable motion detection on INT_ENABLE (register 0x38)
+    // Bit 6 = Motion detection interrupt enable
+    i2c1_write_reg(MPU6050_ADDR, 0x38, 0x40);
+
+    // Configure INT_PIN_CFG (register 0x37)
+    // 0x20 = INT is active high, push-pull, held until cleared
+    i2c1_write_reg(MPU6050_ADDR, 0x37, 0x20);
+
+    // Configure ACCEL_CONFIG if needed (optional, for sensitivity)
+    // i2c1_write_reg(MPU6050_ADDR, 0x1C, 0x00); // ±2g
+
+    // Enable motion detection in MOT_DETECT_CTRL (register 0x69)
+    // Set ACCEL_ON_DELAY to 1 LSB (bit 5:4 = 01), enable accelerometer hardware intelligence
+    i2c1_write_reg(MPU6050_ADDR, 0x69, 0x15);
+
+    // Reset motion detection status by reading INT_STATUS (register 0x3A)
+    uint8_t dummy;
+    i2c1_read_bytes(MPU6050_ADDR, 0x3A, &dummy, 1);
 }
 
 /* Light sensor initialization */
@@ -896,6 +930,7 @@ int main(void) {
     i2c2_init();
     for (volatile int i = 0; i < 1600000; ++i);
     mpu6050_init();
+    mpu6050_enable_motion_interrupt();
     for (volatile int i = 0; i < 1600000; ++i);
 
     set_ds3231_time(2025, 6, 24, 2, 14, 30, 0);
@@ -911,7 +946,7 @@ int main(void) {
 
     // Rotation tracking variables
     static uint32_t last_sample_time = 0;
-    int session_active = 0;
+    // session_active is now global/volatile
     uint32_t last_significant_motion = 0;
     uint32_t pull_timeout_start = 0;
     float pullRevolutions = 0.0f;         // Current pull revolutions
@@ -930,12 +965,23 @@ int main(void) {
     // Print command help
     uart_print("Type 'help' for available commands\r\n\r\n");
 
+    // Initialize gyroscope interrupt
+    gyro_int_init();
+
     while (1) {
         mpu6050_gyro_t gyro;
         mpu6050_read_gyro_z(&gyro);
 
         // Get current time for timeout detection
         current_time = getTimeMs();
+
+        if (!session_active) {
+            if (!wakeup_requested) {
+                __WFI(); // Sleep until motion interrupt
+            }
+            wakeup_requested = 0;
+            // After waking, session_active will be set by EXTI handler
+        }
 
         // Sensor error recovery
         if (gyro.z == 0 && gyro.z_dps == 0.0f) {
