@@ -1008,7 +1008,6 @@ int main(void) {
 
     // Rotation tracking variables
     static uint32_t last_sample_time = 0;
-    // session_active is now global/volatile
     uint32_t last_significant_motion = 0;
     uint32_t pull_timeout_start = 0;
     float pullRevolutions = 0.0f;         // Current pull revolutions
@@ -1036,6 +1035,7 @@ int main(void) {
             uart_print("Going to sleep...\r\n");
             __WFI();
             uart_print("Woke up!\r\n");
+            wakeup_requested = 0;
             for (volatile int i = 0; i < 200000; i++); // Brief delay
             // after wake, wakeup_requested already set by EXTI
             continue;
