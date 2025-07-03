@@ -29,7 +29,7 @@
 // Wake sensitivity: motion interrupt threshold (LSB units) - increase for less sensitivity
 #define MPU_WAKE_THRESHOLD 60        // default was 20
 // Minimum gyro rate (°/s) to wake from sleep
-#define WAKE_DPS_THRESHOLD 8.0f      // Adjust: higher = less sensitive wake
+#define WAKE_DPS_THRESHOLD 3.0f      // Adjust: higher = less sensitive wake
 
 
 /* Function Declarations */
@@ -834,18 +834,28 @@ void mpu6050_read_gyro_z(mpu6050_gyro_t *gyro) {
 void gyro_int_init(void) {
     // Enable GPIOA clock
     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    
     // Set PA10 as input (default)
     GPIOA->MODER &= ~(0x3 << (10 * 2));
+    
+    // Enable an internal pull-up on PA10
+    GPIOA->PUPDR &= ~(0x3 << (10 * 2));
+    GPIOA->PUPDR |= (0x1 << (10 * 2));   // 01: Pull-up
+    
     // Enable SYSCFG clock
     RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
+    
     // Map EXTI10 to PA10
     SYSCFG->EXTICR[2] &= ~SYSCFG_EXTICR3_EXTI10;
-    SYSCFG->EXTICR[2] |= (0x0 << SYSCFG_EXTICR3_EXTI10_Pos); // 0x0 = Port A
+    SYSCFG->EXTICR[2] |= (0x0 << SYSCFG_EXTICR3_EXTI10_Pos); // Port A
+    
     // Unmask EXTI10
     EXTI->IMR |= EXTI_IMR_MR10;
-    // Rising edge trigger (or falling, depending on sensor)
+    
+    // Configure both rising and falling triggers to catch a narrow pulse
     EXTI->RTSR |= EXTI_RTSR_TR10;
     EXTI->FTSR |= EXTI_FTSR_TR10;
+    
     // Enable EXTI15_10 interrupt in NVIC
     NVIC_EnableIRQ(EXTI15_10_IRQn);
 }
