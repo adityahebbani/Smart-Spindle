@@ -845,6 +845,7 @@ void gyro_int_init(void) {
     EXTI->IMR |= EXTI_IMR_MR10;
     // Rising edge trigger (or falling, depending on sensor)
     EXTI->RTSR |= EXTI_RTSR_TR10;
+    EXTI->FTSR |= EXTI_FTSR_TR10;
     // Enable EXTI15_10 interrupt in NVIC
     NVIC_EnableIRQ(EXTI15_10_IRQn);
 }
