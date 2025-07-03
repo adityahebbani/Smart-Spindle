@@ -1031,8 +1031,8 @@ int main(void) {
     gyro_int_init();
 
     while (1) {
-        // Sleep until interrupt if no session and no wake request
-        if (!session_active && !wakeup_requested) {
+        // Sleep until interrupt if no session, no wake request, and no UART input in progress
+        if (!session_active && !wakeup_requested && (uartRxIndex == 0)) {
             uart_print("Going to sleep...\r\n");
             // Disable SysTick interrupt before sleep
             SysTick->CTRL &= ~SysTick_CTRL_TICKINT_Msk;
