@@ -1033,7 +1033,11 @@ int main(void) {
         // Sleep until interrupt if no session and no wake request
         if (!session_active && !wakeup_requested) {
             uart_print("Going to sleep...\r\n");
+            // Disable SysTick interrupt before sleep
+            SysTick->CTRL &= ~SysTick_CTRL_TICKINT_Msk;
             __WFI();
+            // Re-enable SysTick interrupt after wake
+            SysTick->CTRL |= SysTick_CTRL_TICKINT_Msk;
             uart_print("Woke up!\r\n");
             wakeup_requested = 0;
             for (volatile int i = 0; i < 200000; i++); // Brief delay
