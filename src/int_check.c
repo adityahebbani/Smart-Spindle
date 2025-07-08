@@ -62,7 +62,29 @@ void MPU6050_Enable_Motion_Interrupt(void) {
     I2C1_WriteReg(MPU6050_ADDR, MPU6050_INT_PIN_CFG, 0x20);
 }
 
-// --- LED and interrupt on PA10 ---
+// --- UART functions for terminal output ---
+void UART_Init(void) {
+    // Enable GPIOA and USART2 clocks
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    RCC->APB1ENR |= RCC_APB1ENR_USART2EN;
+    // Configure PA2 as TX (Alternate function AF7)
+    GPIOA->MODER &= ~(0x3 << (2*2));
+    GPIOA->MODER |= (0x2 << (2*2));
+    GPIOA->AFR[0] &= ~(0xF << (2*4));
+    GPIOA->AFR[0] |= (0x7 << (2*4));
+    // Configure USART2: 9600 baud, 8-bit, no parity, 1 stop bit. (Assuming 16MHz clock)
+    USART2->BRR = 16000000 / 9600;
+    USART2->CR1 = USART_CR1_TE | USART_CR1_UE;
+}
+
+void UART_Print(const char *str) {
+    while(*str) {
+        while(!(USART2->SR & USART_SR_TXE));
+        USART2->DR = *str++;
+    }
+}
+
+// --- LED and external interrupt on PA10 ---
 
 // Initialize LED on PA5
 void LED_Init(void) {
@@ -75,7 +97,7 @@ void LED_Init(void) {
     GPIOA->ODR &= ~(1 << 5);
 }
 
-// Initialize external interrupt on PA10 (MPU6050 INT pin)
+// Initialize external interrupt on PA10 (connected to MPU6050 INT)
 void Interrupt_Pin_Init(void) {
     // Enable GPIOA clock
     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
@@ -99,17 +121,30 @@ void Interrupt_Pin_Init(void) {
     NVIC_EnableIRQ(EXTI15_10_IRQn);
 }
 
-// EXTI15_10 Interrupt Handler: Toggle LED on PA5 each time PA10 triggers
+// EXTI15_10 Interrupt Handler: Flash LED on PA5 and print a message when an interrupt is triggered
 void EXTI15_10_IRQHandler(void) {
     if (EXTI->PR & EXTI_PR_PR10) {
         // Clear pending flag for EXTI10
         EXTI->PR = EXTI_PR_PR10;
-        // Toggle LED on PA5
-        GPIOA->ODR ^= (1 << 5);
+        
+        // Turn on LED on PA5
+        GPIOA->ODR |= (1 << 5);
+        
+        // Print message to terminal
+        UART_Print("Motion Interrupt Triggered!\r\n");
+        
+        // Delay for visible LED flash (adjust delay as needed)
+        for (volatile int i = 0; i < 500000; i++);
+        
+        // Turn off LED on PA5
+        GPIOA->ODR &= ~(1 << 5);
     }
 }
 
 int main(void) {
+    // Initialize UART for terminal output
+    UART_Init();
+    
     // Initialize I2C, MPU6050, and enable motion interrupt
     I2C1_Init();
     MPU6050_Init();
@@ -119,7 +154,7 @@ int main(void) {
     LED_Init();
     Interrupt_Pin_Init();
     
-    // Main loop: enter sleep mode, waiting for interrupts (triggered by motion)
+    // Main loop: enter sleep mode, waiting for interrupts (motion-triggered)
     while (1) {
         __WFI();
     }
