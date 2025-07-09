@@ -861,7 +861,9 @@ void gyro_int_init(void) {
 volatile int wakeup_requested = 0;
 volatile int session_active = 0;
 volatile uint32_t last_wakeup_time = 0;
+volatile uint32_t last_gyro_print_time = 0;  // Track when we last printed gyro values
 #define MIN_WAKE_TIME_MS 10000  // Stay awake for minimum 10 seconds after interrupt
+#define GYRO_PRINT_INTERVAL_MS 200  // Print gyro values every 200ms while awake
 volatile uint32_t last_significant_motion = 0; 
 
 // --- EXTI15 IRQ Handler (called on gyroscope interrupt) ---
@@ -1056,8 +1058,21 @@ int main(void) {
             // Reset the timer so that sleep is not re-triggered immediately
             last_significant_motion = getTimeMs();
             wakeup_requested = 0;
+            last_gyro_print_time = 0;  // Reset gyro print time to print immediately when waking
             for (volatile int i = 0; i < 200000; i++); // Brief delay
             continue;
+        }
+        
+        // Print gyro values regularly while awake
+        if ((current_time - last_gyro_print_time) > GYRO_PRINT_INTERVAL_MS) {
+            // Read fresh gyro data
+            mpu6050_gyro_t fresh_gyro;
+            mpu6050_read_gyro_z(&fresh_gyro);
+            
+            char gyro_msg[64];
+            snprintf(gyro_msg, sizeof(gyro_msg), "Gyro Z: %.2f dps\r\n", fresh_gyro.z_dps);
+            uart_print(gyro_msg);
+            last_gyro_print_time = current_time;
         }
         
         // --- Light sensor detection (roll change event) ---
