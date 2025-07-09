@@ -1069,9 +1069,10 @@ int main(void) {
             mpu6050_gyro_t fresh_gyro;
             mpu6050_read_gyro_z(&fresh_gyro);
             
-            char gyro_msg[64];
-            snprintf(gyro_msg, sizeof(gyro_msg), "Gyro Z: %.2f dps\r\n", fresh_gyro.z_dps);
-            uart_print(gyro_msg);
+            uart_print("Gyro Z: ");
+            print_float(fresh_gyro.z_dps, 2);
+            uart_print(" dps\r\n");
+            
             last_gyro_print_time = current_time;
         }
         
