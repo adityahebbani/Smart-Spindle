@@ -26,9 +26,7 @@
 #define SIGNIFICANT_GYRO_THRESHOLD 0.1f       // Minimum revolution change to register movement
 #define PULL_TIMEOUT_MS 1000          // Timeout for pull end detection
 #define SESSION_TIMEOUT_MS 10000     // 10 seconds session timeout (like original)
-// Wake sensitivity: motion interrupt threshold (LSB units) - increase for less sensitivity
-#define MPU_WAKE_THRESHOLD 60        // default was 20
-// Minimum gyro rate (°/s) to wake from sleep
+#define MPU_WAKE_THRESHOLD 60        
 #define WAKE_DPS_THRESHOLD 3.0f      // Adjust: higher = less sensitive wake
 
 
@@ -862,6 +860,8 @@ void gyro_int_init(void) {
 
 volatile int wakeup_requested = 0;
 volatile int session_active = 0;
+volatile uint32_t last_wakeup_time = 0;
+#define MIN_WAKE_TIME_MS 10000  // Stay awake for minimum 10 seconds after interrupt
 volatile uint32_t last_significant_motion = 0; 
 
 // --- EXTI15 IRQ Handler (called on gyroscope interrupt) ---
@@ -877,6 +877,7 @@ void EXTI15_10_IRQHandler(void) {
             logger(LOG_INFO, msg);
             wakeup_requested = 1;
             last_significant_motion = getTimeMs();
+            last_wakeup_time = getTimeMs(); // Record the time of wake-up
             // Clear sensor interrupt latch by reading INT_STATUS
             uint8_t dummy;
             i2c1_read_bytes(MPU6050_ADDR, 0x3A, &dummy, 1);
@@ -1039,9 +1040,11 @@ int main(void) {
         // --- Sleep check ---
         // Device goes to sleep only if no active session,
         // 10 seconds have passed since the last significant motion,
+        // minimum wake time has passed since last interrupt,
         // and no UART input is pending.
         if (!session_active &&
             ((current_time - last_significant_motion) > SESSION_TIMEOUT_MS) &&
+            ((current_time - last_wakeup_time) > MIN_WAKE_TIME_MS) &&
             (uartRxIndex == 0)) {
             
             uart_print("Going to sleep...\r\n");
