@@ -862,6 +862,7 @@ void gyro_int_init(void) {
 
 volatile int wakeup_requested = 0;
 volatile int session_active = 0;
+volatile uint32_t last_significant_motion = 0; 
 
 // --- EXTI15 IRQ Handler (called on gyroscope interrupt) ---
 void EXTI15_10_IRQHandler(void) {
@@ -875,6 +876,7 @@ void EXTI15_10_IRQHandler(void) {
             snprintf(msg, sizeof(msg), "Wake interrupt: %.2f dps", gyro.z_dps);
             logger(LOG_INFO, msg);
             wakeup_requested = 1;
+            last_significant_motion = getTimeMs();
             // Clear sensor interrupt latch by reading INT_STATUS
             uint8_t dummy;
             i2c1_read_bytes(MPU6050_ADDR, 0x3A, &dummy, 1);
@@ -976,96 +978,94 @@ int is_light_on(void) {
     return lux > 1000; // Example threshold
 }
 
-// --- Main function ---
 int main(void) {
-    // Light sensor roll change detection state
+    // --- Variable declarations ---
+    uint32_t current_time = 0;
+    uint32_t last_sample_time = 0;
+    uint32_t pull_timeout_start = 0;
+    float pullRevolutions = 0.0f;         // Accumulated revolutions for the current pull
+    float previousPullRevolutions = 0.0f;   // Previous sample value for movement detection
+    float sessionRevolutions = 0.0f;        // Total revolutions for the current session
     int last_light_state = is_light_on();
-    uint32_t last_light_event_time = getTimeMs();
-    // Initialize TSL2591 light sensor
-    tsl2591_init();
-    // Enable GPIOA clock
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
-    // Set PA5 as output (LED)
-    GPIOA->MODER &= ~(0x3 << (5 * 2));
-    GPIOA->MODER |= (0x1 << (5 * 2));
     
-    // Initialize UART with receive capability
+    char datetime[32];
+    char log_msg[128];
+    
+    // --- Peripheral and sensor initialization ---
+    // Initialize light sensor and set GPIO for the LED
+    tsl2591_init();
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    GPIOA->MODER = (GPIOA->MODER & ~(0x3 << (5 * 2))) | (0x1 << (5 * 2)); // PA5 as output
+    
+    // Initialize UART and blink LED for startup feedback
     uart_init();
-
-    // Blink LED a few times to show startup
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 5; i++) {
         GPIOA->ODR ^= (1 << 5);
-        for (volatile int j = 0; j < 800000; ++j);
+        for (volatile int j = 0; j < 800000; j++);
     }
-
-    // I2C and MPU6050 init
+    
+    // Initialize I2C buses and MPU6050, then enable its motion interrupt
     i2c1_init();
     i2c2_init();
-    for (volatile int i = 0; i < 1600000; ++i);
+    for (volatile int i = 0; i < 1600000; i++);
     mpu6050_init();
     mpu6050_enable_motion_interrupt();
-    for (volatile int i = 0; i < 1600000; ++i);
-
+    for (volatile int i = 0; i < 1600000; i++);
+    
+    // Set RTC time
     set_ds3231_time(2025, 6, 24, 2, 14, 30, 0);
-
-    // Check device ID - should be 0x69 for MPU6050 (when AD0=1)
+    
+    // Read and display MPU6050 device ID
     uint8_t devid = mpu6050_read_devid();
-    char init_msg[50];
-    snprintf(init_msg, sizeof(init_msg), "MPU6050 ID: 0x%02X (expect 0x69 with AD0=1)\r\n", devid);
-    uart_print(init_msg);
-
-    // Systick timer for millisecond timing
-    SysTick_Config(SystemCoreClock / 1000); // 1 ms tick
-
-    // Rotation tracking variables
-    static uint32_t last_sample_time = 0;
-    uint32_t last_significant_motion = 0;
-    uint32_t pull_timeout_start = 0;
-    float pullRevolutions = 0.0f;         // Current pull revolutions
-    float previousPullRevolutions = 0.0f;
-    float sessionRevolutions = 0.0f;      // Total session revolutions
-    uint32_t last_motion_time = 0;        // Last motion timestamp
-    uint32_t current_time = 0;            // Current time
-
-    // Print startup message
-    char log_msg[128];
-    char datetime[32];
+    snprintf(log_msg, sizeof(log_msg), "MPU6050 ID: 0x%02X (expect 0x69 with AD0=1)\r\n", devid);
+    uart_print(log_msg);
+    
+    // Setup SysTick for millisecond timing (SystemCoreClock is 84MHz)
+    SysTick_Config(SystemCoreClock / 1000);
+    
+    // Print startup message and available commands
     rtc_get_datetime(datetime, sizeof(datetime));
     snprintf(log_msg, sizeof(log_msg), "[%s] Smart Spindle Ready (Gyroscope Mode)\r\n", datetime);
     uart_print(log_msg);
-
-    // Print command help
     uart_print("Type 'help' for available commands\r\n\r\n");
-
-    // Initialize gyroscope interrupt
+    
+    // Initialize MPU6050 interrupt handling
     gyro_int_init();
-
+    
+    // --- Main loop ---
     while (1) {
-        // Only allow sleep if session is not active AND 10s have passed since last significant motion
         current_time = getTimeMs();
-        if (!session_active && (current_time - last_significant_motion > SESSION_TIMEOUT_MS) && (uartRxIndex == 0)) {
+        
+        // --- Sleep check ---
+        // Device goes to sleep only if no active session,
+        // 10 seconds have passed since the last significant motion,
+        // and no UART input is pending.
+        if (!session_active &&
+            ((current_time - last_significant_motion) > SESSION_TIMEOUT_MS) &&
+            (uartRxIndex == 0)) {
+            
             uart_print("Going to sleep...\r\n");
-            // Disable SysTick interrupt before sleep
+            // Disable SysTick interrupt during sleep for lower power consumption
             SysTick->CTRL &= ~SysTick_CTRL_TICKINT_Msk;
             __WFI();
-            // Re-enable SysTick interrupt after wake
             SysTick->CTRL |= SysTick_CTRL_TICKINT_Msk;
             uart_print("Woke up!\r\n");
+            // Reset the timer so that sleep is not re-triggered immediately
+            last_significant_motion = getTimeMs();
             wakeup_requested = 0;
             for (volatile int i = 0; i < 200000; i++); // Brief delay
-            // after wake, wakeup_requested already set by EXTI
             continue;
         }
-        // --- Light sensor roll change detection ---
+        
+        // --- Light sensor detection (roll change event) ---
         int light_now = is_light_on();
         if (light_now && !last_light_state) {
-            // Rising edge: roll cover opened or roll changed
             rtc_get_datetime(datetime, sizeof(datetime));
             uart_print("[ROLL CHANGE DETECTED] Light ON at ");
             uart_print(datetime);
             uart_print("\r\n");
             log_session_event(EVENT_ROLL_CHANGE, datetime, 0.0f);
-            // Optionally reset session counters, etc.
+            // Reset session-related variables on roll change
             sessionRevolutions = 0.0f;
             pullRevolutions = 0.0f;
             previousPullRevolutions = 0.0f;
@@ -1074,14 +1074,13 @@ int main(void) {
             last_significant_motion = current_time;
         }
         last_light_state = light_now;
+        
+        // --- MPU6050 gyro reading and error recovery ---
         mpu6050_gyro_t gyro;
         mpu6050_read_gyro_z(&gyro);
-
-        // Get current time for timeout detection
         current_time = getTimeMs();
-
-        // Sensor error recovery
         if (gyro.z == 0 && gyro.z_dps == 0.0f) {
+            // If sensor returns zero, attempt bus recovery every 5 seconds
             static uint32_t last_recovery = 0;
             if (current_time - last_recovery > 5000) {
                 i2c_bus_recovery();
@@ -1091,29 +1090,26 @@ int main(void) {
             }
             continue;
         }
-
-        // Time delta for integration
+        
+        // --- Time delta calculation ---
         if (last_sample_time == 0) last_sample_time = current_time;
-        float dt = (current_time - last_sample_time) / 1000.0f; // ms to seconds
+        float dt = (current_time - last_sample_time) / 1000.0f;
         last_sample_time = current_time;
-
-        // Deadband to ignore gyro noise
-        if (fabsf(gyro.z_dps) < 1.0f) gyro.z_dps = 0.0f;
-
-        // Integrate gyro Z to get revolutions
+        
+        // --- Gyro deadband filtering ---
+        if (fabsf(gyro.z_dps) < 1.0f)
+            gyro.z_dps = 0.0f;
+        
+        // --- Integrate gyro reading into revolutions ---
         float delta_revs = (gyro.z_dps * dt) / 360.0f;
         pullRevolutions += delta_revs;
-
-        // Detect significant movement
-        int significant_movement = fabsf(pullRevolutions - previousPullRevolutions) > SIGNIFICANT_GYRO_THRESHOLD;
-
-        if (significant_movement) {
+        
+        // --- Significant movement detection ---
+        if (fabsf(pullRevolutions - previousPullRevolutions) > SIGNIFICANT_GYRO_THRESHOLD) {
             previousPullRevolutions = pullRevolutions;
             last_significant_motion = current_time;
-
-            // Start session if not already active
+            // Start a session if not already active
             if (!session_active) {
-                // clear wake request flag now that movement detected
                 wakeup_requested = 0;
                 session_active = 1;
                 sessionRevolutions = 0.0f;
@@ -1123,28 +1119,26 @@ int main(void) {
                 snprintf(log_msg, sizeof(log_msg), "[%s] Session started\r\n", datetime);
                 uart_print(log_msg);
             }
-
-            // Reset pull timeout
             pull_timeout_start = current_time;
         }
-
-         // Handle pull timeout (1s after last significant movement)
-        if (session_active && pull_timeout_start > 0 &&
-            (current_time - pull_timeout_start > PULL_TIMEOUT_MS)) {
-
-            float roundedRevolutions = roundf(pullRevolutions * 4.0f) / 4.0f;
-            if (fabsf(roundedRevolutions) > 0.25f) {
+        
+        // --- Handle pull timeout (1 second of inactivity) ---
+        if (session_active && pull_timeout_start &&
+            ((current_time - pull_timeout_start) > PULL_TIMEOUT_MS)) {
+            
+            float roundedRevs = roundf(pullRevolutions * 4.0f) / 4.0f;
+            if (fabsf(roundedRevs) > 0.25f) {
                 uart_print("Pull end: ");
-                print_float(roundedRevolutions, 2);
+                print_float(roundedRevs, 2);
                 uart_print(" revolutions\r\n");
-                sessionRevolutions += roundedRevolutions;
+                sessionRevolutions += roundedRevs;
             }
             pullRevolutions = 0.0f;
             previousPullRevolutions = 0.0f;
             pull_timeout_start = 0;
         }
-
-        // Handle session timeout (10s after last significant movement)
+        
+        // --- Handle session timeout (10 seconds after last motion) ---
         if (session_active && (current_time - last_significant_motion > SESSION_TIMEOUT_MS)) {
             session_active = 0;
             float absSessionRevs = fabsf(sessionRevolutions);
@@ -1155,7 +1149,6 @@ int main(void) {
                 uart_print("] Session ended. Total revolutions: ");
                 print_float(absSessionRevs, 2);
                 uart_print("\r\n");
-
                 add_session_to_memory(datetime, absSessionRevs);
                 log_session_event(EVENT_DISPENSE, datetime, absSessionRevs);
             } else {
@@ -1166,13 +1159,16 @@ int main(void) {
             previousPullRevolutions = 0.0f;
             pull_timeout_start = 0;
         }
-
-        // Print debug information
+        
+        // --- (Optional) Debug print to monitor variables ---
         // char dbg[64];
-        // snprintf(dbg, sizeof(dbg), "dt=%.3f, gyro.z_dps=%.2f, delta_revs=%.3f, pullRevs=%.3f\n", dt, gyro.z_dps, delta_revs, pullRevolutions);
+        // snprintf(dbg, sizeof(dbg), "dt=%.3f, gyro.z_dps=%.2f, delta_revs=%.3f, pullRevs=%.3f\r\n",
+        //         dt, gyro.z_dps, delta_revs, pullRevolutions);
         // uart_print(dbg);
-
-        // Short delay to prevent overwhelming the I2C bus
-        // for (volatile int i = 0; i < 500; ++i);
+        
+        // --- (Optional) Short delay to ease I2C bus load ---
+        // for (volatile int i = 0; i < 500; i++);
     }
+    
+    return 0;
 }
