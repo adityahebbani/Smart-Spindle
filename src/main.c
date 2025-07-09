@@ -878,7 +878,7 @@ void EXTI15_10_IRQHandler(void) {
             snprintf(msg, sizeof(msg), "Wake interrupt: %.2f dps", gyro.z_dps);
             logger(LOG_INFO, msg);
             wakeup_requested = 1;
-            last_significant_motion = getTimeMs();
+            last_significant_motion = getTimeMs();  // Reset timeout counter when waking up from motion
             last_wakeup_time = getTimeMs(); // Record the time of wake-up
             // Clear sensor interrupt latch by reading INT_STATUS
             uint8_t dummy;
@@ -1040,10 +1040,11 @@ int main(void) {
         current_time = getTimeMs();
         
         // --- Sleep check ---
-        // Device goes to sleep only if no active session,
-        // 10 seconds have passed since the last significant motion,
-        // minimum wake time has passed since last interrupt,
-        // and no UART input is pending.
+        // Device goes to sleep only if:
+        // 1. No active session
+        // 2. No significant motion in the last 10 seconds (SESSION_TIMEOUT_MS)
+        // 3. Minimum wake time has passed since last interrupt
+        // 4. No UART input is pending
         if (!session_active &&
             ((current_time - last_significant_motion) > SESSION_TIMEOUT_MS) &&
             ((current_time - last_wakeup_time) > MIN_WAKE_TIME_MS) &&
@@ -1056,7 +1057,7 @@ int main(void) {
             SysTick->CTRL |= SysTick_CTRL_TICKINT_Msk;
             uart_print("Woke up!\r\n");
             // Reset the timer so that sleep is not re-triggered immediately
-            last_significant_motion = getTimeMs();
+            last_wakeup_time = getTimeMs();
             wakeup_requested = 0;
             last_gyro_print_time = 0;  // Reset gyro print time to print immediately when waking
             for (volatile int i = 0; i < 200000; i++); // Brief delay
@@ -1126,7 +1127,7 @@ int main(void) {
         // --- Significant movement detection ---
         if (fabsf(pullRevolutions - previousPullRevolutions) > SIGNIFICANT_GYRO_THRESHOLD) {
             previousPullRevolutions = pullRevolutions;
-            last_significant_motion = current_time;
+            last_significant_motion = current_time;  // Reset the timeout counter on significant movement
             // Start a session if not already active
             if (!session_active) {
                 wakeup_requested = 0;
