@@ -300,7 +300,8 @@ void process_command(const char* cmd) {
         char help[] = "\r\nAvailable commands:\r\n"
                       "  dump     - Print session history\r\n"
                       "  clear    - Clear session history\r\n"
-                      "  diag     - Run MPU6050 diagnostic\r\n" 
+                      "  diag     - Run MPU6050 diagnostic\r\n"
+                      "  gyro     - Read raw gyro values\r\n" 
                       "  help     - Show this help message\r\n";
         for (const char *p = help; *p; ++p) {
             while (!(USART2->SR & USART_SR_TXE));
@@ -311,6 +312,21 @@ void process_command(const char* cmd) {
     else if (strcmp(cmd, "diag") == 0) {
         uart_print("\r\nRunning MPU6050 diagnostic...\r\n");
         mpu6050_diagnostic();
+    }
+    // Command: gyro - read raw gyro values
+    else if (strcmp(cmd, "gyro") == 0) {
+        uart_print("\r\nReading gyro values...\r\n");
+        for (int i = 0; i < 10; i++) {
+            mpu6050_gyro_t gyro;
+            mpu6050_read_gyro_z(&gyro);
+            
+            char msg[80];
+            snprintf(msg, sizeof(msg), "Sample %d: Raw=%d, DPS=%.2f\r\n", i+1, gyro.z, gyro.z_dps);
+            uart_print(msg);
+            
+            // Small delay between readings
+            for (volatile int j = 0; j < 100000; j++);
+        }
     }
     else {
         char unknown[] = "Unknown command. Type 'help' for available commands.\r\n";
@@ -829,6 +845,11 @@ void mpu6050_read_gyro_z(mpu6050_gyro_t *gyro) {
         // On error, set values to zero
         gyro->z = 0;
         gyro->z_dps = 0.0f;
+        
+        // Debug: Log I2C read error
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Gyro read error: %d", result);
+        logger(LOG_ERROR, msg);
         return;
     }
     
@@ -837,6 +858,11 @@ void mpu6050_read_gyro_z(mpu6050_gyro_t *gyro) {
     
     // Convert to degrees per second (for ±250°/s range: LSB = 131 LSB/°/s)
     gyro->z_dps = (float)gyro->z / 131.0f;
+    
+    // Debug: Uncomment the next 3 lines if you want to see raw values
+    // char debug_msg[80];
+    // snprintf(debug_msg, sizeof(debug_msg), "Raw gyro: 0x%02X 0x%02X = %d = %.2f dps", buf[0], buf[1], gyro->z, gyro->z_dps);
+    // logger(LOG_DEBUG, debug_msg);
 }
 
 // --- Gyroscope INT pin (e.g., PA10) as external interrupt ---
@@ -943,8 +969,12 @@ uint8_t mpu6050_read_devid(void) {
 }
 
 void mpu6050_enable_motion_interrupt(void) {
-    // First set power management - ensure we're not in sleep mode and using most reliable clock
-    i2c1_write_reg(MPU6050_ADDR, MPU6050_PWR_MGMT_1, 0x01); // Use PLL with X-axis gyro as clock reference
+    // Keep power management consistent with mpu6050_init (use internal 8MHz oscillator)
+    i2c1_write_reg(MPU6050_ADDR, MPU6050_PWR_MGMT_1, 0x00); // Wake up, use internal oscillator
+    
+    // Ensure gyroscope and accelerometer are both configured properly
+    i2c1_write_reg(MPU6050_ADDR, MPU6050_GYRO_CONFIG, 0x00);  // ±250°/s gyro range
+    i2c1_write_reg(MPU6050_ADDR, MPU6050_ACCEL_CONFIG, 0x00); // ±2g accel range
     
     // Set motion threshold (MOT_THR, register 0x1F)
     // Each bit = 2mg (at ±2g scale). Lower value = more sensitive
@@ -953,9 +983,6 @@ void mpu6050_enable_motion_interrupt(void) {
     // Set motion duration (MOT_DUR, register 0x20)
     // Value is in ms, 1 = 1ms (minimum duration above threshold)
     i2c1_write_reg(MPU6050_ADDR, 0x20, 1); // Very short duration for responsiveness
-
-    // Configure accelerometer for motion detection
-    i2c1_write_reg(MPU6050_ADDR, 0x1C, 0x00); // ±2g range, no high-pass filter
 
     // Configure INT_PIN_CFG (register 0x37)
     // 0x30 = INT is active low, open drain, latch until interrupt status read
@@ -1326,7 +1353,20 @@ void mpu6050_diagnostic(void) {
     // Read current gyro values
     mpu6050_gyro_t gyro;
     mpu6050_read_gyro_z(&gyro);
-    snprintf(msg, sizeof(msg), "Gyro Z: %.2f dps\r\n", gyro.z_dps);
+    snprintf(msg, sizeof(msg), "Gyro Z: Raw=%d, DPS=%.2f\r\n", gyro.z, gyro.z_dps);
+    uart_print(msg);
+    
+    // Read gyro config register
+    uint8_t gyro_config = 0;
+    i2c1_read_bytes(MPU6050_ADDR, MPU6050_GYRO_CONFIG, &gyro_config, 1);
+    snprintf(msg, sizeof(msg), "Gyro Config: 0x%02X (should be 0x00 for ±250°/s)\r\n", gyro_config);
+    uart_print(msg);
+    
+    // Test direct register read for gyro Z
+    uint8_t gyro_raw[2];
+    int gyro_result = i2c1_read_bytes(MPU6050_ADDR, MPU6050_GYRO_ZOUT_H, gyro_raw, 2);
+    snprintf(msg, sizeof(msg), "Direct Gyro Z read: result=%d, bytes=0x%02X 0x%02X\r\n", 
+             gyro_result, gyro_raw[0], gyro_raw[1]);
     uart_print(msg);
     
     uart_print("------- End of MPU6050 Diagnostic -------\r\n");
