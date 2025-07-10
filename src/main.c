@@ -1,58 +1,172 @@
+/*
+ * Smart Spindle - Motion Detection and Session Tracking System
+ * 
+ * This system tracks paper roll rotations using an MPU6050 gyroscope and manages
+ * session data with automatic sleep/wake functionality. Features include:
+ * - Motion-based session tracking with gyroscope Z-axis monitoring
+ * - Light sensor for roll change detection
+ * - UART command interface for diagnostics and data retrieval
+ * - Flash memory logging with session history
+ * - Low-power sleep mode with motion interrupt wake-up
+ * 
+ * Hardware:
+ * - STM32F4xx microcontroller
+ * - MPU6050 gyroscope/accelerometer (I2C1: PB8/PB9)
+ * - DS3231 RTC (I2C2: PB10/PB11)
+ * - TSL2591 light sensor
+ * - UART2 debug interface (PA2/PA3)
+ */
+
 #include "stm32f4xx.h"
 #include <stdio.h>
 #include <string.h>
-#define _USE_MATH_DEFINES
 #include <math.h>
 #include <stdint.h>
 #include "core_cm4.h"
 
-// Define M_PI if not already defined
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
+// I2C Device Addresses
 #define DS3231_ADDR 0x68
 #define MPU6050_ADDR 0x68
-#define MPU6050_WHO_AM_I 0x75  // Device ID register
-#define MPU6050_PWR_MGMT_1 0x6B // Power management register
-#define MPU6050_GYRO_CONFIG 0x1B // Gyroscope configuration
-#define MPU6050_GYRO_ZOUT_H 0x47 // Gyroscope Z-axis high byte
-#define MPU6050_GYRO_ZOUT_L 0x48 // Gyroscope Z-axis low byte
+
+// MPU6050 Register Addresses
+#define MPU6050_WHO_AM_I 0x75
+#define MPU6050_PWR_MGMT_1 0x6B
+#define MPU6050_GYRO_CONFIG 0x1B
 #define MPU6050_ACCEL_CONFIG 0x1C
-#define MPU6050_GYRO_XOUT_H  0x43
+#define MPU6050_GYRO_ZOUT_H 0x47
 
-// Constants from original Espruino code
-#define PUCK_GYRO_CONSTANT 600000.0f  // Magic constant for gyro to revolutions conversion
-#define SIGNIFICANT_GYRO_THRESHOLD 0.1f       // Minimum revolution change to register movement
-#define PULL_TIMEOUT_MS 1000          // Timeout for pull end detection
-#define SESSION_TIMEOUT_MS 10000     // 10 seconds session timeout (like original)
-#define MPU_WAKE_THRESHOLD 10        // Even lower value = more sensitive wake detection (was 20)
-#define WAKE_DPS_THRESHOLD 1.5f      // Lower value = more sensitive wake detection (was 3.0f)
+// System Configuration
+#define SIGNIFICANT_GYRO_THRESHOLD 0.1f
+#define PULL_TIMEOUT_MS 1000
+#define SESSION_TIMEOUT_MS 10000
+#define MPU_WAKE_THRESHOLD 10
+#define WAKE_DPS_THRESHOLD 1.5f
+#define GYRO_PRINT_INTERVAL_MS 2000
 
 
-/* Function Declarations */
-void process_command(const char* cmd);
-float get_total_rotations(void);
-void print_session_history(void);
-void mpu6050_diagnostic(void);
-void uart_print(const char *str);
-int i2c1_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data);
-int i2c1_read_bytes(uint8_t dev_addr, uint8_t reg, uint8_t *buf, uint8_t len);
-int i2c2_read_reg(uint8_t dev_addr, uint8_t reg, uint8_t *data);
-int i2c2_read_bytes(uint8_t dev_addr, uint8_t reg, uint8_t *buf, uint8_t len);
-int i2c2_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data);
+// ================================
+// TYPE DEFINITIONS
+// ================================
 
-/* Forward declarations for MPU6050 types and functions */
+// Logger levels
+typedef enum { 
+    LOG_OFF, 
+    LOG_ERROR, 
+    LOG_INFO, 
+    LOG_DEBUG, 
+    LOG_SILLY 
+} LogLevel;
+
+// Event types
+typedef enum { 
+    EVENT_ROLL_CHANGE, 
+    EVENT_DISPENSE 
+} EventType;
+
+// MPU6050 gyroscope data
 typedef struct { 
-    int16_t z;     // Only Z-axis needed for rotation tracking
-    float z_dps;   // Z-axis in degrees per second
+    int16_t z;
+    float z_dps;
 } mpu6050_gyro_t;
 
-void mpu6050_read_gyro_z(mpu6050_gyro_t *gyro);
+// Event structure
+typedef struct {
+    EventType type;
+    char date[16];
+    float revs;
+} Event;
 
-/* Logger */
-typedef enum { LOG_OFF, LOG_ERROR, LOG_INFO, LOG_DEBUG, LOG_SILLY } LogLevel;
+// Session log structure
+typedef struct {
+    char datetime[32];
+    float rotations;
+    uint32_t timestamp;
+} SessionLog;
+
+// ================================
+// GLOBAL VARIABLES
+// ================================
+
 LogLevel log_level = LOG_INFO;
+
+#define MAX_EVENTS 32
+Event eventArray[MAX_EVENTS];
+int eventCount = 0;
+
+#define MAX_SESSION_LOGS 20
+SessionLog sessionHistory[MAX_SESSION_LOGS];
+int sessionLogCount = 0;
+int sessionLogIndex = 0;
+
+// System state variables
+volatile int session_active = 0;
+volatile int wakeup_requested = 0;
+volatile uint32_t last_wakeup_time = 0;
+volatile uint32_t last_significant_motion = 0;
+volatile uint32_t last_gyro_print_time = 0;
+
+#define MIN_WAKE_TIME_MS 5000
+
+#define UART_RX_BUFFER_SIZE 64
+volatile char uartRxBuffer[UART_RX_BUFFER_SIZE];
+volatile uint8_t uartRxIndex = 0;
+volatile uint8_t cmdReady = 0;
+
+// ================================
+// FUNCTION DECLARATIONS
+// ================================
+
+// System functions
+void internal_clock(void);
+void systick_init(void);
+uint32_t getTimeMs(void);
+
+// Logger
+void logger(LogLevel level, const char* msg);
+
+// UART functions
+void uart_init(void);
+void uart_print(const char *str);
+void process_command(const char* cmd);
+
+// I2C functions
+void i2c1_init(void);
+void i2c2_init(void);
+void i2c_bus_recovery(void);
+int i2c1_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data);
+int i2c1_read_bytes(uint8_t dev_addr, uint8_t reg, uint8_t *buf, uint8_t len);
+int i2c2_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data);
+int i2c2_read_bytes(uint8_t dev_addr, uint8_t reg, uint8_t *buf, uint8_t len);
+
+// MPU6050 functions
+void mpu6050_init(void);
+void mpu6050_read_gyro_z(mpu6050_gyro_t *gyro);
+void mpu6050_enable_motion_interrupt(void);
+void mpu6050_diagnostic(void);
+uint8_t mpu6050_read_devid(void);
+void gyro_int_init(void);
+
+// RTC functions
+void rtc_get_datetime(char *buf, size_t len);
+uint8_t bcd2bin(uint8_t bcd);
+
+// Session management
+void add_session_to_memory(const char* datetime, float rotations);
+void print_session_history(void);
+float get_total_rotations(void);
+
+// Light sensor
+int is_light_on(void);
+
+// Flash memory
+void flash_log_append(Event *event);
+void log_session_event(EventType type, const char *date, float revs);
+
+// Utility functions
+void print_float(float val, int decimals);
+// ================================
+// UTILITY FUNCTIONS
+// ================================
 
 void logger(LogLevel level, const char* msg) {
     if (level <= log_level) {
@@ -60,44 +174,38 @@ void logger(LogLevel level, const char* msg) {
     }
 }
 
-// Event types
-typedef enum { EVENT_ROLL_CHANGE, EVENT_DISPENSE } EventType;
-
-typedef struct {
-    EventType type;
-    char date[16]; // YYMMDDhhmmss
-    float revs;
-} Event;
-
-#define MAX_EVENTS 32
-Event eventArray[MAX_EVENTS];
-int eventCount = 0;
-
-/* Convert floats to strings */
 void print_float(float val, int decimals) {
-    // Convert float to string manually
     char buf[32];
-    // Round based on number of decimals
     float scale = 1.0f;
-    for (int i = 0; i < decimals; i++) scale *= 10.0f;
+    
+    for (int i = 0; i < decimals; i++) {
+        scale *= 10.0f;
+    }
+    
     int isNegative = (val < 0);
     if (isNegative) val = -val;
 
     int wholePart = (int)val;
-    int fracPart = (int)((val - wholePart) * scale + 0.5f); // Round
+    int fracPart = (int)((val - wholePart) * scale + 0.5f);
+    
     if (isNegative) {
         snprintf(buf, sizeof(buf), "-%d.%0*d", wholePart, decimals, fracPart);
     } else {
         snprintf(buf, sizeof(buf), "%d.%0*d", wholePart, decimals, fracPart);
     }
 
-    // Print via UART/etc.
     uart_print(buf);
 }
 
-/* Internal clock set to 84 MHz */
-void internal_clock(void)
-{
+uint8_t bcd2bin(uint8_t bcd) {
+    return (bcd >> 4) * 10 + (bcd & 0x0F);
+}
+
+// ================================
+// SYSTEM FUNCTIONS
+// ================================
+
+void internal_clock(void) {
     // Enable HSI
     RCC->CR |= RCC_CR_HSION;
     while ((RCC->CR & RCC_CR_HSIRDY) == 0);
@@ -120,17 +228,20 @@ void internal_clock(void)
     while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_PLL);
 }
 
-/* RTC Logic */
+// SysTick for millisecond timing
 volatile uint32_t msTicks = 0;
-void SysTick_Handler(void) { msTicks++; }
-uint32_t getTimeMs(void) { return msTicks; }
-
-// Helper: Convert BCD to binary
-static uint8_t bcd2bin(uint8_t val) {
-    return (val >> 4) * 10 + (val & 0x0F);
+void SysTick_Handler(void) { 
+    msTicks++; 
 }
 
-// Helper: Convert binary to BCD
+uint32_t getTimeMs(void) { 
+    return msTicks; 
+}
+
+// ================================
+// RTC FUNCTIONS
+// ================================
+
 static uint8_t bin2bcd(uint8_t val) {
     return ((val / 10) << 4) | (val % 10);
 }
@@ -140,27 +251,25 @@ int set_ds3231_time(uint16_t year, uint8_t month, uint8_t day, uint8_t weekday,
     uint8_t data[7];
     data[0] = bin2bcd(sec);
     data[1] = bin2bcd(min);
-    data[2] = bin2bcd(hour);      // 24h mode
-    data[3] = bin2bcd(weekday);   // 1=Sunday, 7=Saturday
+    data[2] = bin2bcd(hour);
+    data[3] = bin2bcd(weekday);
     data[4] = bin2bcd(day);
     data[5] = bin2bcd(month);
     data[6] = bin2bcd(year % 100);
 
-    // Write all 7 bytes starting at register 0x00
     for (int i = 0; i < 7; ++i) {
         if (i2c2_write_reg(DS3231_ADDR, 0x00 + i, data[i]) != 0)
-            return -1; // Error
+            return -1;
     }
-    return 0; // Success
+    return 0;
 }
 
-// RTC read
 void rtc_get_datetime(char *buf, size_t len) {
     uint8_t data[7] = {0};
     if (i2c2_read_bytes(DS3231_ADDR, 0x00, data, 7) == 0) {
         uint8_t sec  = bcd2bin(data[0]);
         uint8_t min  = bcd2bin(data[1]);
-        uint8_t hour = bcd2bin(data[2] & 0x3F); // 24h mode
+        uint8_t hour = bcd2bin(data[2] & 0x3F);
         uint8_t day  = bcd2bin(data[4]);
         uint8_t mon  = bcd2bin(data[5] & 0x1F);
         uint16_t year = 2000 + bcd2bin(data[6]);
@@ -170,43 +279,25 @@ void rtc_get_datetime(char *buf, size_t len) {
     }
 }
 
-/* Temporary memory handling */
-// In-memory session log structure
-typedef struct {
-    char datetime[32];
-    float rotations;
-    uint32_t timestamp;
-} SessionLog;
+// ================================
+// SESSION MANAGEMENT
+// ================================
 
-#define MAX_SESSION_LOGS 20  // Store last 20 sessions in volatile memory
-SessionLog sessionHistory[MAX_SESSION_LOGS];
-int sessionLogCount = 0;
-int sessionLogIndex = 0;  // Circular buffer index
-
-// Function to add a session to memory log
 void add_session_to_memory(const char* datetime, float rotations) {
-    // Use circular buffer approach to keep most recent sessions
     strncpy(sessionHistory[sessionLogIndex].datetime, datetime, sizeof(sessionHistory[0].datetime));
     sessionHistory[sessionLogIndex].rotations = rotations;
     sessionHistory[sessionLogIndex].timestamp = getTimeMs();
     
     sessionLogIndex = (sessionLogIndex + 1) % MAX_SESSION_LOGS;
     
-    // Increase count until buffer is full
     if (sessionLogCount < MAX_SESSION_LOGS) {
         sessionLogCount++;
     }
 }
 
-// Function to print all sessions in memory
 void print_session_history(void) {
-    char header[] = "\r\n--- Session History ---\r\n";
-    for (const char *p = header; *p; ++p) {
-        while (!(USART2->SR & USART_SR_TXE));
-        USART2->DR = *p;
-    }
+    uart_print("\r\n--- Session History ---\r\n");
     
-    // Start with oldest entry (when buffer is full)
     int start = (sessionLogCount == MAX_SESSION_LOGS) ? sessionLogIndex : 0;
     for (int i = 0; i < sessionLogCount; i++) {
         int idx = (start + i) % MAX_SESSION_LOGS;
@@ -214,16 +305,10 @@ void print_session_history(void) {
         snprintf(entry, sizeof(entry), "[%s] Rotations: %.2f\r\n",
                 sessionHistory[idx].datetime,
                 sessionHistory[idx].rotations);
-        
-        for (const char *p = entry; *p; ++p) {
-            while (!(USART2->SR & USART_SR_TXE));
-            USART2->DR = *p;
-        }
+        uart_print(entry);
     }
 }
 
-/* Rotation logic */
-// Function to calculate total rotations across all sessions
 float get_total_rotations(void) {
     float total = 0.0f;
     for (int i = 0; i < sessionLogCount; i++) {
@@ -232,47 +317,28 @@ float get_total_rotations(void) {
     return total;
 }
 
-/* UART Terminal commands */
-#define UART_RX_BUFFER_SIZE 64
-volatile char uartRxBuffer[UART_RX_BUFFER_SIZE];
-volatile uint8_t uartRxIndex = 0;
-volatile uint8_t cmdReady = 0;
-
-// Command definitions
-#define CMD_DUMP_DATA "dump"
-#define CMD_CLEAR_DATA "clear"
-#define CMD_HELP "help"
-
-// Initialize UART with receive capability
+// ================================
+// UART FUNCTIONS
+// ================================
 void uart_init(void) {
-    // Enable GPIOA clock
+    // Enable GPIOA and USART2 clocks
     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
-    // Enable USART2 clock
     RCC->APB1ENR |= RCC_APB1ENR_USART2EN;
     
-    // Set PA2 (TX) to alternate function (AF7)
-    GPIOA->MODER &= ~(0x3 << (2 * 2));
-    GPIOA->MODER |= (0x2 << (2 * 2));
-    GPIOA->AFR[0] &= ~(0xF << (2 * 4));
-    GPIOA->AFR[0] |= (0x7 << (2 * 4));
+    // Configure PA2 (TX) and PA3 (RX) as alternate function AF7
+    GPIOA->MODER &= ~((0x3 << (2 * 2)) | (0x3 << (3 * 2)));
+    GPIOA->MODER |= (0x2 << (2 * 2)) | (0x2 << (3 * 2));
+    GPIOA->AFR[0] &= ~((0xF << (2 * 4)) | (0xF << (3 * 4)));
+    GPIOA->AFR[0] |= (0x7 << (2 * 4)) | (0x7 << (3 * 4));
     
-    // Set PA3 (RX) to alternate function (AF7)
-    GPIOA->MODER &= ~(0x3 << (3 * 2));
-    GPIOA->MODER |= (0x2 << (3 * 2));
-    GPIOA->AFR[0] &= ~(0xF << (3 * 4));
-    GPIOA->AFR[0] |= (0x7 << (3 * 4));
-    
-    // APB1 is 16 MHz by default
+    // Configure USART2: 9600 baud, enable TX/RX and RXNE interrupt
     USART2->BRR = (uint16_t)(16000000 / 9600);
-    
-    // Enable transmitter, receiver, and RXNE interrupt
     USART2->CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_RXNEIE | USART_CR1_UE;
     
     // Enable USART2 interrupt in NVIC
     NVIC_EnableIRQ(USART2_IRQn);
 }
 
-// Print a string to UART
 void uart_print(const char *str) {
     for (const char *p = str; *p; ++p) {
         while (!(USART2->SR & USART_SR_TXE));
@@ -280,49 +346,30 @@ void uart_print(const char *str) {
     }
 }
 
-// Process received command
 void process_command(const char* cmd) {
     if (strcmp(cmd, "dump") == 0) {
         print_session_history();
-        
         char total[64];
         snprintf(total, sizeof(total), "Total rotations: %.2f\r\n", get_total_rotations());
-        for (const char *p = total; *p; ++p) {
-            while (!(USART2->SR & USART_SR_TXE));
-            USART2->DR = *p;
-        }
+        uart_print(total);
     }
-
-    // Command: clear - reset session history
     else if (strcmp(cmd, "clear") == 0) {
         sessionLogCount = 0;
         sessionLogIndex = 0;
-        
-        char msg[] = "Session history cleared\r\n";
-        for (const char *p = msg; *p; ++p) {
-            while (!(USART2->SR & USART_SR_TXE));
-            USART2->DR = *p;
-        }
+        uart_print("Session history cleared\r\n");
     }
-    // Command: help - show available commands
     else if (strcmp(cmd, "help") == 0) {
-        char help[] = "\r\nAvailable commands:\r\n"
-                      "  dump     - Print session history\r\n"
-                      "  clear    - Clear session history\r\n"
-                      "  diag     - Run MPU6050 diagnostic\r\n"
-                      "  gyro     - Read raw gyro values\r\n" 
-                      "  help     - Show this help message\r\n";
-        for (const char *p = help; *p; ++p) {
-            while (!(USART2->SR & USART_SR_TXE));
-            USART2->DR = *p;
-        }
+        uart_print("\r\nAvailable commands:\r\n"
+                   "  dump     - Print session history\r\n"
+                   "  clear    - Clear session history\r\n"
+                   "  diag     - Run MPU6050 diagnostic\r\n"
+                   "  gyro     - Read raw gyro values\r\n" 
+                   "  help     - Show this help message\r\n");
     }
-    // Command: diag - run MPU6050 diagnostic
     else if (strcmp(cmd, "diag") == 0) {
         uart_print("\r\nRunning MPU6050 diagnostic...\r\n");
         mpu6050_diagnostic();
     }
-    // Command: gyro - read raw gyro values
     else if (strcmp(cmd, "gyro") == 0) {
         uart_print("\r\nReading gyro values...\r\n");
         for (int i = 0; i < 10; i++) {
@@ -338,15 +385,11 @@ void process_command(const char* cmd) {
         }
     }
     else {
-        char unknown[] = "Unknown command. Type 'help' for available commands.\r\n";
-        for (const char *p = unknown; *p; ++p) {
-            while (!(USART2->SR & USART_SR_TXE));
-            USART2->DR = *p;
-        }
+        uart_print("Unknown command. Type 'help' for available commands.\r\n");
     }
 }
 
-// USART2 IRQ handler for receiving commands
+// USART2 interrupt handler
 void USART2_IRQHandler(void) {
     if (USART2->SR & USART_SR_RXNE) {
         char c = USART2->DR;
@@ -355,26 +398,15 @@ void USART2_IRQHandler(void) {
         while (!(USART2->SR & USART_SR_TXE));
         USART2->DR = c;
         
-        // Process character
         if (c == '\r' || c == '\n') {
-            // Command terminator received
-            uartRxBuffer[uartRxIndex] = '\0';  // Null-terminate
-            cmdReady = 1;  // Set command ready flag
-
-            // Echo newline
+            uartRxBuffer[uartRxIndex] = '\0';
             uart_print("\r\n");
-            
-            // Process command
             process_command((char*)uartRxBuffer);
-            
-            // Reset buffer
             uartRxIndex = 0;
         }
         else if (c == 8 || c == 127) {  // Backspace or Delete
             if (uartRxIndex > 0) {
                 uartRxIndex--;
-                
-                // Echo backspace sequence to clear character
                 uart_print("\b \b");
             }
         }
@@ -384,16 +416,15 @@ void USART2_IRQHandler(void) {
     }
 }
 
-
-
-/* Flash memory handling */
-#define FLASH_LOG_SECTOR   7  // Use sector 7 (last 128KB of 512KB flash)
-#define FLASH_LOG_ADDRESS  0x08060000  // Start of sector 7
-#define FLASH_LOG_SIZE     (128 * 1024) // 128KB
+// ================================
+// FLASH MEMORY FUNCTIONS
+// ================================
+#define FLASH_LOG_SECTOR   7
+#define FLASH_LOG_ADDRESS  0x08060000
+#define FLASH_LOG_SIZE     (128 * 1024)
 #define FLASH_LOG_ENTRY_SIZE sizeof(Event)
 #define FLASH_LOG_MAX_ENTRIES (FLASH_LOG_SIZE / FLASH_LOG_ENTRY_SIZE)
 
-// STM32F4xx flash sector erase function
 void flash_erase_sector(uint32_t sector) {
     FLASH->KEYR = 0x45670123;
     FLASH->KEYR = 0xCDEF89AB;
@@ -405,12 +436,12 @@ void flash_erase_sector(uint32_t sector) {
     FLASH->CR &= ~FLASH_CR_SER;
 }
 
-// STM32F4xx flash write function (writes one Event)
 void flash_write_event(uint32_t address, Event *event) {
     FLASH->KEYR = 0x45670123;
     FLASH->KEYR = 0xCDEF89AB;
     while (FLASH->SR & FLASH_SR_BSY);
     FLASH->CR |= FLASH_CR_PG;
+    
     uint32_t *src = (uint32_t*)event;
     uint32_t *dst = (uint32_t*)address;
     for (size_t i = 0; i < sizeof(Event)/4; ++i) {
@@ -420,7 +451,6 @@ void flash_write_event(uint32_t address, Event *event) {
     FLASH->CR &= ~FLASH_CR_PG;
 }
 
-// Find next free log slot (0xFFFFFFFF means empty)
 uint32_t flash_log_find_next(void) {
     for (uint32_t i = 0; i < FLASH_LOG_MAX_ENTRIES; ++i) {
         uint32_t *entry = (uint32_t*)(FLASH_LOG_ADDRESS + i * FLASH_LOG_ENTRY_SIZE);
@@ -428,21 +458,18 @@ uint32_t flash_log_find_next(void) {
             return FLASH_LOG_ADDRESS + i * FLASH_LOG_ENTRY_SIZE;
         }
     }
-    return 0; // Full
+    return 0;
 }
 
-// Append event to flash log (erase sector if full)
 void flash_log_append(Event *event) {
     uint32_t addr = flash_log_find_next();
     if (addr == 0) {
-        // Erase sector and start over
         flash_erase_sector(FLASH_LOG_SECTOR);
         addr = FLASH_LOG_ADDRESS;
     }
     flash_write_event(addr, event);
 }
 
-// Example: log an event (call this from your interrupt/session handler) - REWRITE
 void log_session_event(EventType type, const char *date, float revs) {
     Event ev;
     ev.type = type;
@@ -451,7 +478,9 @@ void log_session_event(EventType type, const char *date, float revs) {
     flash_log_append(&ev);
 }
 
-// --- I2C1 (PB8=SCL, PB9=SDA) setup for MPU6050 gyroscope ---
+// ================================
+// I2C FUNCTIONS
+// ================================
 void i2c1_init(void) {
     // Reset I2C1 peripheral
     RCC->APB1RSTR |= RCC_APB1RSTR_I2C1RST;
@@ -900,14 +929,6 @@ void gyro_int_init(void) {
     NVIC_EnableIRQ(EXTI15_10_IRQn);
 }
 
-volatile int wakeup_requested = 0;
-volatile int session_active = 0;
-volatile uint32_t last_wakeup_time = 0;
-volatile uint32_t last_gyro_print_time = 0;  // Track when we last printed gyro values
-#define MIN_WAKE_TIME_MS 10000  // Stay awake for minimum 10 seconds after interrupt
-#define GYRO_PRINT_INTERVAL_MS 200  // Print gyro values every 200ms while awake
-volatile uint32_t last_significant_motion = 0; 
-
 // --- EXTI15 IRQ Handler (called on gyroscope interrupt) ---
 void EXTI15_10_IRQHandler(void) {
     if (EXTI->PR & EXTI_PR_PR10) {
@@ -1063,90 +1084,85 @@ int is_light_on(void) {
     return lux > 1000; // Example threshold
 }
 
+// ================================
+// MAIN FUNCTION
+// ================================
+
 int main(void) {
-    // --- Variable declarations ---
+    // System state variables
     uint32_t current_time = 0;
     uint32_t last_sample_time = 0;
     uint32_t pull_timeout_start = 0;
-    float pullRevolutions = 0.0f;         // Accumulated revolutions for the current pull
-    float previousPullRevolutions = 0.0f;   // Previous sample value for movement detection
-    float sessionRevolutions = 0.0f;        // Total revolutions for the current session
+    float pullRevolutions = 0.0f;
+    float previousPullRevolutions = 0.0f;
+    float sessionRevolutions = 0.0f;
     int last_light_state = is_light_on();
     
     char datetime[32];
     char log_msg[128];
     
-    // --- Peripheral and sensor initialization ---
-    // Initialize light sensor and set GPIO for the LED
+    // Initialize peripherals
     tsl2591_init();
     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
-    GPIOA->MODER = (GPIOA->MODER & ~(0x3 << (5 * 2))) | (0x1 << (5 * 2)); // PA5 as output
+    GPIOA->MODER = (GPIOA->MODER & ~(0x3 << (5 * 2))) | (0x1 << (5 * 2));
     
-    // Initialize UART and blink LED for startup feedback
     uart_init();
+    
+    // Startup LED blink
     for (int i = 0; i < 5; i++) {
         GPIOA->ODR ^= (1 << 5);
         for (volatile int j = 0; j < 800000; j++);
     }
     
-    // Initialize I2C buses and MPU6050, then enable its motion interrupt
+    // Initialize I2C and sensors
     i2c1_init();
     i2c2_init();
     for (volatile int i = 0; i < 1600000; i++);
+    
     mpu6050_init();
     mpu6050_enable_motion_interrupt();
-    for (volatile int i = 0; i < 1600000; i++);
+    gyro_int_init();
     
-    // Set RTC time
+    // Set initial RTC time
     set_ds3231_time(2025, 6, 24, 2, 14, 30, 0);
     
-    // Read and display MPU6050 device ID
-    uint8_t devid = mpu6050_read_devid();
-    snprintf(log_msg, sizeof(log_msg), "MPU6050 ID: 0x%02X (expect 0x69 with AD0=1)\r\n", devid);
-    uart_print(log_msg);
-    
-    // Setup SysTick for millisecond timing (SystemCoreClock is 84MHz)
+    // Setup system timing
     SysTick_Config(SystemCoreClock / 1000);
     
-    // Print startup message and available commands
+    // Print startup message
+    uint8_t devid = mpu6050_read_devid();
+    snprintf(log_msg, sizeof(log_msg), "MPU6050 ID: 0x%02X (expect 0x69)\r\n", devid);
+    uart_print(log_msg);
+    
     rtc_get_datetime(datetime, sizeof(datetime));
-    snprintf(log_msg, sizeof(log_msg), "[%s] Smart Spindle Ready (Gyroscope Mode)\r\n", datetime);
+    snprintf(log_msg, sizeof(log_msg), "[%s] Smart Spindle Ready\r\n", datetime);
     uart_print(log_msg);
     uart_print("Type 'help' for available commands\r\n\r\n");
     
-    // Initialize MPU6050 interrupt handling
-    gyro_int_init();
-    
-    // --- Main loop ---
+    // Main loop
     while (1) {
         current_time = getTimeMs();
         
-        // --- Sleep check ---
-        // Device goes to sleep only if:
-        // 1. No active session
-        // 2. No significant motion in the last 10 seconds (SESSION_TIMEOUT_MS)
-        // 3. Minimum wake time has passed since last interrupt
-        // 4. No UART input is pending
+        // Sleep management
         if (!session_active &&
             ((current_time - last_significant_motion) > SESSION_TIMEOUT_MS) &&
             ((current_time - last_wakeup_time) > MIN_WAKE_TIME_MS) &&
             (uartRxIndex == 0)) {
             
             uart_print("Going to sleep...\r\n");
-            // Disable SysTick interrupt during sleep for lower power consumption
             SysTick->CTRL &= ~SysTick_CTRL_TICKINT_Msk;
             __WFI();
             SysTick->CTRL |= SysTick_CTRL_TICKINT_Msk;
             uart_print("Woke up!\r\n");
-            // Reset the timer so that sleep is not re-triggered immediately
+            
             last_wakeup_time = getTimeMs();
             wakeup_requested = 0;
-            last_gyro_print_time = 0;  // Reset gyro print time to print immediately when waking
-            for (volatile int i = 0; i < 200000; i++); // Brief delay
+            last_gyro_print_time = 0;
+            for (volatile int i = 0; i < 200000; i++);
             continue;
         }
         
-        // Print gyro values regularly while awake
+        // Regular gyro value printing
         if ((current_time - last_gyro_print_time) > GYRO_PRINT_INTERVAL_MS) {
             // Read fresh gyro data
             mpu6050_gyro_t fresh_gyro;
