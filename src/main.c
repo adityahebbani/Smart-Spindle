@@ -26,14 +26,15 @@
 #define SIGNIFICANT_GYRO_THRESHOLD 0.1f       // Minimum revolution change to register movement
 #define PULL_TIMEOUT_MS 1000          // Timeout for pull end detection
 #define SESSION_TIMEOUT_MS 10000     // 10 seconds session timeout (like original)
-#define MPU_WAKE_THRESHOLD 60        
-#define WAKE_DPS_THRESHOLD 3.0f      // Adjust: higher = less sensitive wake
+#define MPU_WAKE_THRESHOLD 20        // Lower value = more sensitive wake detection (was 60)
+#define WAKE_DPS_THRESHOLD 1.5f      // Lower value = more sensitive wake detection (was 3.0f)
 
 
 /* Function Declarations */
 void process_command(const char* cmd);
 float get_total_rotations(void);
 void print_session_history(void);
+void mpu6050_diagnostic(void);
 int i2c1_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data);
 int i2c1_read_bytes(uint8_t dev_addr, uint8_t reg, uint8_t *buf, uint8_t len);
 int i2c2_read_reg(uint8_t dev_addr, uint8_t reg, uint8_t *data);
@@ -297,13 +298,19 @@ void process_command(const char* cmd) {
     // Command: help - show available commands
     else if (strcmp(cmd, "help") == 0) {
         char help[] = "\r\nAvailable commands:\r\n"
-                      "  dump  - Print session history\r\n"
-                      "  clear - Clear session history\r\n"
-                      "  help  - Show this help message\r\n";
+                      "  dump     - Print session history\r\n"
+                      "  clear    - Clear session history\r\n"
+                      "  diag     - Run MPU6050 diagnostic\r\n" 
+                      "  help     - Show this help message\r\n";
         for (const char *p = help; *p; ++p) {
             while (!(USART2->SR & USART_SR_TXE));
             USART2->DR = *p;
         }
+    }
+    // Command: diag - run MPU6050 diagnostic
+    else if (strcmp(cmd, "diag") == 0) {
+        uart_print("\r\nRunning MPU6050 diagnostic...\r\n");
+        mpu6050_diagnostic();
     }
     else {
         char unknown[] = "Unknown command. Type 'help' for available commands.\r\n";
@@ -801,6 +808,10 @@ void mpu6050_init(void) {
     // Configure gyroscope range: +/- 250 degrees/sec (most sensitive)
     i2c1_write_reg(MPU6050_ADDR, MPU6050_GYRO_CONFIG, 0x00);
     
+    // Configure accelerometer range: +/- 2g (most sensitive, 0x00)
+    // This is important for motion detection sensitivity
+    i2c1_write_reg(MPU6050_ADDR, MPU6050_ACCEL_CONFIG, 0x00);
+    
     // Additional delay for stability
     for (volatile int i = 0; i < 100000; i++);
 }
@@ -870,19 +881,40 @@ volatile uint32_t last_significant_motion = 0;
 void EXTI15_10_IRQHandler(void) {
     if (EXTI->PR & EXTI_PR_PR10) {
         EXTI->PR = EXTI_PR_PR10; // Clear pending bit
-        // Read gyro and only wake on strong motion
+        
+        // Read interrupt status to see what triggered it
+        uint8_t int_status = 0;
+        i2c1_read_bytes(MPU6050_ADDR, 0x3A, &int_status, 1);
+        
+        // Read both gyro and accel data for diagnostic
         mpu6050_gyro_t gyro;
         mpu6050_read_gyro_z(&gyro);
-        if (fabsf(gyro.z_dps) >= WAKE_DPS_THRESHOLD) {
-            char msg[64];
-            snprintf(msg, sizeof(msg), "Wake interrupt: %.2f dps", gyro.z_dps);
-            logger(LOG_INFO, msg);
+        
+        // Read accelerometer data (all three axes for better motion detection)
+        uint8_t accel_data[6];
+        i2c1_read_bytes(MPU6050_ADDR, 0x3B, accel_data, 6); // Read XYZ accel
+        int16_t accel_x = (int16_t)(accel_data[0] << 8 | accel_data[1]);
+        int16_t accel_y = (int16_t)(accel_data[2] << 8 | accel_data[3]);
+        int16_t accel_z = (int16_t)(accel_data[4] << 8 | accel_data[5]);
+        
+        // Calculate magnitude of acceleration (remove gravity component)
+        float accel_mag = sqrtf(accel_x*accel_x + accel_y*accel_y + accel_z*accel_z);
+        float accel_g = accel_mag / 16384.0f; // Convert to g (at ±2g range)
+        
+        char msg[96];
+        snprintf(msg, sizeof(msg), "Int: 0x%02X | Gyro: %.2f dps | Accel: %.2f g", 
+                 int_status, gyro.z_dps, accel_g);
+        logger(LOG_INFO, msg);
+        
+        // Wake on either strong gyro movement OR accelerometer movement
+        if (fabsf(gyro.z_dps) >= WAKE_DPS_THRESHOLD || 
+            fabsf(accel_g - 1.0f) >= 0.1f || // Detect non-gravity acceleration
+            (int_status & 0x40)) { // Motion detection bit
+            
             wakeup_requested = 1;
-            last_significant_motion = getTimeMs();  // Reset timeout counter when waking up from motion
-            last_wakeup_time = getTimeMs(); // Record the time of wake-up
-            // Clear sensor interrupt latch by reading INT_STATUS
-            uint8_t dummy;
-            i2c1_read_bytes(MPU6050_ADDR, 0x3A, &dummy, 1);
+            last_significant_motion = getTimeMs();
+            last_wakeup_time = getTimeMs();
+            uart_print("Motion detected - waking up\r\n");
         }
         // Do NOT set session_active here; let main loop handle it
     }
@@ -901,28 +933,35 @@ uint8_t mpu6050_read_devid(void) {
 }
 
 void mpu6050_enable_motion_interrupt(void) {
+    // First set power management - ensure we're not in sleep mode and using most reliable clock
+    i2c1_write_reg(MPU6050_ADDR, MPU6050_PWR_MGMT_1, 0x01); // Use PLL with X-axis gyro as clock reference
+    
     // Set motion threshold (MOT_THR, register 0x1F)
-    // Value is in LSB, adjust as needed; higher = stronger motion required
-    i2c1_write_reg(MPU6050_ADDR, 0x1F, MPU_WAKE_THRESHOLD);
+    // Each bit = 2mg (at ±2g scale). Lower value = more sensitive
+    i2c1_write_reg(MPU6050_ADDR, 0x1F, MPU_WAKE_THRESHOLD); 
 
     // Set motion duration (MOT_DUR, register 0x20)
     // Value is in ms, 1 = 1ms (minimum duration above threshold)
-    i2c1_write_reg(MPU6050_ADDR, 0x20, 40); // 40ms
+    i2c1_write_reg(MPU6050_ADDR, 0x20, 20); // Shorter duration (was 40ms)
+
+    // Enable all axes for motion detection by setting zero in ACCEL_HPF
+    i2c1_write_reg(MPU6050_ADDR, 0x1C, 0x00); // ±2g range, no high-pass filter
+
+    // Configure INT_PIN_CFG (register 0x37)
+    // 0x10 = INT is active high, open drain, 50us pulse
+    i2c1_write_reg(MPU6050_ADDR, 0x37, 0x10); 
 
     // Enable motion detection on INT_ENABLE (register 0x38)
     // Bit 6 = Motion detection interrupt enable
     i2c1_write_reg(MPU6050_ADDR, 0x38, 0x40);
 
-    // Configure INT_PIN_CFG (register 0x37)
-    // 0x20 = INT is active high, push-pull, held until cleared
-    i2c1_write_reg(MPU6050_ADDR, 0x37, 0x20);
-
-    // Configure ACCEL_CONFIG if needed (optional, for sensitivity)
-    // i2c1_write_reg(MPU6050_ADDR, 0x1C, 0x00); // ±2g
-
     // Enable motion detection in MOT_DETECT_CTRL (register 0x69)
-    // Set ACCEL_ON_DELAY to 1 LSB (bit 5:4 = 01), enable accelerometer hardware intelligence
+    // 0x15: Enable accelerometer intelligence, 1ms delay, low-power mode with 20Hz rate
     i2c1_write_reg(MPU6050_ADDR, 0x69, 0x15);
+    
+    // Set low-power wake frequency to 5Hz in Register 107 (0x6B)
+    // This affects accelerometer rate in low power mode
+    i2c1_write_reg(MPU6050_ADDR, 0x6C, 0x40);
 
     // Reset motion detection status by reading INT_STATUS (register 0x3A)
     uint8_t dummy;
@@ -1191,4 +1230,73 @@ int main(void) {
     }
     
     return 0;
+}
+
+// --- MPU6050 diagnostic function ---
+void mpu6050_diagnostic(void) {
+    char msg[128];
+    
+    // Check device ID
+    uint8_t devid = mpu6050_read_devid();
+    snprintf(msg, sizeof(msg), "MPU6050 Device ID: 0x%02X (expect 0x69 with AD0=1)\r\n", devid);
+    uart_print(msg);
+    
+    // Read power management register
+    uint8_t pwr_mgmt = 0;
+    i2c1_read_bytes(MPU6050_ADDR, MPU6050_PWR_MGMT_1, &pwr_mgmt, 1);
+    snprintf(msg, sizeof(msg), "Power Management: 0x%02X (bit 6 = sleep mode)\r\n", pwr_mgmt);
+    uart_print(msg);
+    
+    // Read interrupt config
+    uint8_t int_cfg = 0;
+    i2c1_read_bytes(MPU6050_ADDR, 0x37, &int_cfg, 1);
+    snprintf(msg, sizeof(msg), "INT Pin Config: 0x%02X\r\n", int_cfg);
+    uart_print(msg);
+    
+    // Read interrupt enable status
+    uint8_t int_enable = 0;
+    i2c1_read_bytes(MPU6050_ADDR, 0x38, &int_enable, 1);
+    snprintf(msg, sizeof(msg), "INT Enable: 0x%02X (bit 6 = motion interrupt)\r\n", int_enable);
+    uart_print(msg);
+    
+    // Read interrupt status
+    uint8_t int_status = 0;
+    i2c1_read_bytes(MPU6050_ADDR, 0x3A, &int_status, 1);
+    snprintf(msg, sizeof(msg), "INT Status: 0x%02X (bit 6 = motion detected)\r\n", int_status);
+    uart_print(msg);
+    
+    // Check motion threshold
+    uint8_t mot_thr = 0;
+    i2c1_read_bytes(MPU6050_ADDR, 0x1F, &mot_thr, 1);
+    snprintf(msg, sizeof(msg), "Motion Threshold: %d (lower = more sensitive)\r\n", mot_thr);
+    uart_print(msg);
+    
+    // Check motion duration
+    uint8_t mot_dur = 0;
+    i2c1_read_bytes(MPU6050_ADDR, 0x20, &mot_dur, 1);
+    snprintf(msg, sizeof(msg), "Motion Duration: %d ms\r\n", mot_dur);
+    uart_print(msg);
+    
+    // Check GPIO pin state (PA10)
+    uint8_t pin_state = (GPIOA->IDR & (1 << 10)) ? 1 : 0;
+    snprintf(msg, sizeof(msg), "INT Pin State: %d\r\n", pin_state);
+    uart_print(msg);
+    
+    // Read current accelerometer values
+    uint8_t accel_data[6];
+    i2c1_read_bytes(MPU6050_ADDR, 0x3B, accel_data, 6);
+    int16_t accel_x = (int16_t)(accel_data[0] << 8 | accel_data[1]);
+    int16_t accel_y = (int16_t)(accel_data[2] << 8 | accel_data[3]);
+    int16_t accel_z = (int16_t)(accel_data[4] << 8 | accel_data[5]);
+    
+    snprintf(msg, sizeof(msg), "Accel X: %d, Y: %d, Z: %d\r\n", accel_x, accel_y, accel_z);
+    uart_print(msg);
+    
+    // Read current gyro values
+    mpu6050_gyro_t gyro;
+    mpu6050_read_gyro_z(&gyro);
+    snprintf(msg, sizeof(msg), "Gyro Z: %.2f dps\r\n", gyro.z_dps);
+    uart_print(msg);
+    
+    uart_print("------- End of MPU6050 Diagnostic -------\r\n");
 }
