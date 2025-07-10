@@ -35,11 +35,20 @@ void process_command(const char* cmd);
 float get_total_rotations(void);
 void print_session_history(void);
 void mpu6050_diagnostic(void);
+void uart_print(const char *str);
 int i2c1_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data);
 int i2c1_read_bytes(uint8_t dev_addr, uint8_t reg, uint8_t *buf, uint8_t len);
 int i2c2_read_reg(uint8_t dev_addr, uint8_t reg, uint8_t *data);
 int i2c2_read_bytes(uint8_t dev_addr, uint8_t reg, uint8_t *buf, uint8_t len);
 int i2c2_write_reg(uint8_t dev_addr, uint8_t reg, uint8_t data);
+
+/* Forward declarations for MPU6050 types and functions */
+typedef struct { 
+    int16_t z;     // Only Z-axis needed for rotation tracking
+    float z_dps;   // Z-axis in degrees per second
+} mpu6050_gyro_t;
+
+void mpu6050_read_gyro_z(mpu6050_gyro_t *gyro);
 
 /* Logger */
 typedef enum { LOG_OFF, LOG_ERROR, LOG_INFO, LOG_DEBUG, LOG_SILLY } LogLevel;
@@ -833,11 +842,6 @@ void mpu6050_init(void) {
 }
 
 // --- Read gyroscope Z-axis data ---
-typedef struct { 
-    int16_t z;     // Only Z-axis needed for rotation tracking
-    float z_dps;   // Z-axis in degrees per second
-} mpu6050_gyro_t;
-
 void mpu6050_read_gyro_z(mpu6050_gyro_t *gyro) {
     uint8_t buf[2];
     int result = i2c1_read_bytes(MPU6050_ADDR, MPU6050_GYRO_ZOUT_H, buf, 2);
@@ -1046,7 +1050,7 @@ uint32_t tsl2591_read_lux(void) {
         return 0;
     }
     uint16_t ch0 = (uint16_t)(buf[1] << 8 | buf[0]);
-    uint16_t ch1 = (uint16_t)(buf[3] << 8 | buf[2]);
+    // uint16_t ch1 = (uint16_t)(buf[3] << 8 | buf[2]); // Unused for simple calculation
     // Simple lux calculation (not calibrated, for thresholding)
     uint32_t lux = ch0;
     return lux;
