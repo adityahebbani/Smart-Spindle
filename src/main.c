@@ -398,6 +398,9 @@ void USART2_IRQHandler(void) {
         while (!(USART2->SR & USART_SR_TXE));
         USART2->DR = c;
         
+        // Any UART activity should prevent sleep
+        last_significant_motion = getTimeMs();
+        
         if (c == '\r' || c == '\n') {
             uartRxBuffer[uartRxIndex] = '\0';
             uart_print("\r\n");
@@ -960,10 +963,11 @@ void EXTI15_10_IRQHandler(void) {
                          int_status, gyro.z_dps, accel_g);
                 logger(LOG_INFO, msg);
                 
-                // Set wake flags
+                // Set wake flags and update timing
+                uint32_t current_time = getTimeMs();
                 wakeup_requested = 1;
-                last_significant_motion = getTimeMs();
-                last_wakeup_time = getTimeMs();
+                last_significant_motion = current_time;
+                last_wakeup_time = current_time;
                 uart_print("Motion detected - waking up\r\n");
             }
         } else {
@@ -976,8 +980,6 @@ void EXTI15_10_IRQHandler(void) {
         // Always clear the MPU6050 interrupt by reading the status register again
         uint8_t dummy;
         i2c1_read_bytes(MPU6050_ADDR, 0x3A, &dummy, 1);
-        
-        // Do NOT set session_active here; let main loop handle it
     }
 }
 
@@ -1139,23 +1141,41 @@ int main(void) {
     uart_print(log_msg);
     uart_print("Type 'help' for available commands\r\n\r\n");
     
+    // Initialize timing variables to prevent premature sleep
+    current_time = getTimeMs();
+    last_significant_motion = current_time;
+    last_wakeup_time = current_time;
+    last_gyro_print_time = current_time;
+    
     // Main loop
     while (1) {
         current_time = getTimeMs();
         
-        // Sleep management
+        // Sleep management - check all conditions
+        uint32_t time_since_motion = current_time - last_significant_motion;
+        uint32_t time_since_wakeup = current_time - last_wakeup_time;
+        
         if (!session_active &&
-            ((current_time - last_significant_motion) > SESSION_TIMEOUT_MS) &&
-            ((current_time - last_wakeup_time) > MIN_WAKE_TIME_MS) &&
+            (time_since_motion > SESSION_TIMEOUT_MS) &&
+            (time_since_wakeup > MIN_WAKE_TIME_MS) &&
             (uartRxIndex == 0)) {
             
+            // Debug: Print sleep reason
+            snprintf(log_msg, sizeof(log_msg), 
+                     "Sleep conditions met: motion=%lu, wakeup=%lu, session=%d, uart=%d\r\n",
+                     time_since_motion, time_since_wakeup, session_active, uartRxIndex);
+            uart_print(log_msg);
             uart_print("Going to sleep...\r\n");
+            
             SysTick->CTRL &= ~SysTick_CTRL_TICKINT_Msk;
             __WFI();
             SysTick->CTRL |= SysTick_CTRL_TICKINT_Msk;
             uart_print("Woke up!\r\n");
             
-            last_wakeup_time = getTimeMs();
+            // Reset timing variables on wake
+            current_time = getTimeMs();
+            last_wakeup_time = current_time;
+            last_significant_motion = current_time;
             wakeup_requested = 0;
             last_gyro_print_time = 0;
             for (volatile int i = 0; i < 200000; i++);
@@ -1173,6 +1193,11 @@ int main(void) {
             uart_print(" dps\r\n");
             
             last_gyro_print_time = current_time;
+            
+            // If we're reading the gyro, consider this activity
+            if (fabsf(fresh_gyro.z_dps) > 0.5f) {
+                last_significant_motion = current_time;
+            }
         }
         
         // --- Light sensor detection (roll change event) ---
@@ -1226,6 +1251,7 @@ int main(void) {
         if (fabsf(pullRevolutions - previousPullRevolutions) > SIGNIFICANT_GYRO_THRESHOLD) {
             previousPullRevolutions = pullRevolutions;
             last_significant_motion = current_time;  // Reset the timeout counter on significant movement
+            
             // Start a session if not already active
             if (!session_active) {
                 wakeup_requested = 0;
@@ -1238,6 +1264,10 @@ int main(void) {
                 uart_print(log_msg);
             }
             pull_timeout_start = current_time;
+        }
+        // Also update motion timer for any gyro activity above deadband
+        else if (fabsf(gyro.z_dps) > 1.0f) {
+            last_significant_motion = current_time;
         }
         
         // --- Handle pull timeout (1 second of inactivity) ---
